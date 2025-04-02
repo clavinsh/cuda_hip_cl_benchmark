@@ -21,74 +21,53 @@ std::string readKernelFile(const std::string &fileName)
 	return sourceCodeBuffer.str();
 }
 
-
-
-
-int main(int argc, char *argv[])
+int main()
 {
-	cl_platform_id platforms[64];
-	unsigned int platformCount;
 
-	cl_int platformResult = clGetPlatformIDs(64, platforms, &platformCount);
+	cl_int clResult; // paredzēts openCL funkciju izsaukumu rezultātu saglabāšanai un pārbaudei
 
-	assert(platformResult == CL_SUCCESS);
+	cl_uint numPlatforms;
 
-	cl_device_id device = nullptr;
+	clResult = clGetPlatformIDs(0, NULL, &numPlatforms);
+	assert(clResult == CL_SUCCESS);
 
-	for (size_t i = 0; i < platformCount; i++)
+	if (numPlatforms == 0)
 	{
-		cl_device_id devices[64];
-		unsigned int deviceCount;
-		cl_int deviceResult = clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, 64, devices, &deviceCount);
+		printf("Couldn't find OpenCL capable platforms!");
+		return -1;
+	}
 
-		if (deviceResult == CL_SUCCESS)
+	cl_platform_id cl_platforms[numPlatforms];
+
+	clResult = clGetPlatformIDs(numPlatforms, cl_platforms, NULL);
+	assert(clResult == CL_SUCCESS);
+
+	char str_buffer[1024];
+
+	for (size_t i = 0; i < numPlatforms; i++)
+	{
+		clResult = clGetPlatformInfo(cl_platforms[i], CL_PLATFORM_VENDOR, sizeof(str_buffer), &str_buffer, NULL);
+		assert(clResult == CL_SUCCESS);
+		printf("[Platform %zu], %s\n", i, str_buffer);
+
+		cl_uint numDevices = 0;
+		clResult = clGetDeviceIDs(cl_platforms[i], CL_DEVICE_TYPE_ALL, 0, NULL, &numDevices);
+		assert(clResult == CL_SUCCESS);
+		printf("%d devices available \n", numDevices);
+
+		cl_device_id devices[numDevices];
+
+		clResult = clGetDeviceIDs(cl_platforms[i], CL_DEVICE_TYPE_ALL, numDevices, devices, NULL);
+		assert(clResult == CL_SUCCESS);
+
+		for (size_t k = 0; k < numDevices; k++)
 		{
-			for (size_t j = 0; j < deviceCount; j++)
-			{
-				char vendorName[256];
-				size_t vendorNameLength;
-				cl_int deviceInfoResult =
-					clGetDeviceInfo(devices[j], CL_DEVICE_VENDOR, 256, vendorName, &vendorNameLength);
-				if (deviceInfoResult == CL_SUCCESS &&
-					std::string(vendorName).substr(0, vendorNameLength) == "NVIDIA CORPORATION")
-				{
-					device = devices[j];
-					break;
-				}
-			}
+			clResult = clGetDeviceInfo(devices[k], CL_DEVICE_NAME, sizeof(str_buffer), &str_buffer, NULL);
+			assert(clResult == CL_SUCCESS);
+
+			printf("Device name: %s\n", str_buffer);
 		}
 	}
-
-	cl_int contextResult;
-	cl_context context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &contextResult);
-
-	assert(contextResult == CL_SUCCESS);
-
-	cl_int commandQueueResult;
-	cl_command_queue queue = clCreateCommandQueueWithProperties(context, device, 0, &commandQueueResult);
-
-	const char *programSource = "";
-	size_t length = 0;
-	cl_int programResult;
-	cl_program program = clCreateProgramWithSource(context, 1, &programSource, &length, &programResult);
-	assert(programResult == CL_SUCCESS);
-
-	cl_int programBuildResult = clBuildProgram(program, 1, &device, "", nullptr, nullptr);
-
-	if (programResult != CL_SUCCESS)
-	{
-		char log[256];
-		size_t logLength;
-		cl_int programBuildInfoResult =
-			clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 256, log, &logLength);
-
-		assert(programBuildInfoResult == CL_SUCCESS);
-	}
-
-	cl_int kernelResult;
-	cl_kernel kernel = clCreateKernel(program, "vector_sum", &kernelResult);
-
-	assert(kernelResult == CL_SUCCESS);
 
 	return 0;
 }
