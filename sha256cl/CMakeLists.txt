@@ -8,4 +8,4 @@ add_executable(${PROJECT_NAME} main.cpp)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 
-target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -g3) #-g3 priekš debug
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror -g3) #-g3 priekš debug

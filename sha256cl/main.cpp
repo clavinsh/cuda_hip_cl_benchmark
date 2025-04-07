@@ -1,5 +1,4 @@
 #include <CL/cl.h>
-
 #include <cassert>
 #include <fstream>
 #include <iostream>
