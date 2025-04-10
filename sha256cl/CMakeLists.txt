@@ -4,8 +4,16 @@ project(PasswordCracker)
 
 find_package(OpenCL REQUIRED)
 
-add_executable(${PROJECT_NAME} main.cpp)
+file(GLOB SRC_FILES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
+add_executable(${PROJECT_NAME} ${SRC_FILES})
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 
 target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror -g3) #-g3 priekš debug
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/kernels ${CMAKE_BINARY_DIR}/kernels
+)
