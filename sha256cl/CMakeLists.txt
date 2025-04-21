@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.7)
 
 project(PasswordCracker)
 
+
+add_definitions(-DCL_TARGET_OPENCL_VERSION=300)
+
 find_package(OpenCL REQUIRED)
 
 file(GLOB SRC_FILES "${CMAKE_SOURCE_DIR}/src/*.cpp")
