@@ -85,7 +85,7 @@ void sha256(const uchar *input, __local uint *hash_output)
 	hash_output[7] += h;
 }
 
-__kernel void sha256_crack(__local const char *passwords, const uint password_len, const uint password_count,
+__kernel void sha256_crack(__local const char *passwords, __local const size_t *offsets, const uint password_count,
 						   __local const uint *target_hash, __global atomic_int *cracked_idx)
 
 {
@@ -96,11 +96,11 @@ __kernel void sha256_crack(__local const char *passwords, const uint password_le
 		return;
 	}
 
-	__local const char *my_password = passwords + (idx * password_len);
+	__local const char *my_password = passwords + offsets[idx];
 
 	uint input[16] = {0};
 
-	for (int i = 0; i < password_len && i < 64; i++)
+	for (int i = 0; my_password[i] != '\0' && i < 64; i++)
 	{
 		((uchar *)input)[i] = my_password[i];
 	}
