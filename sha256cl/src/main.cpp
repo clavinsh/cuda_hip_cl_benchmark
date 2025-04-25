@@ -132,7 +132,7 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	cl_int clResult;
 
 	std::vector<char> kernelPasswords;
-	std::vector<size_t> offsets;
+	std::vector<uint32_t> offsets;
 	int crackedIdx = -1;
 
 	int currentOffset = 0;
@@ -140,8 +140,7 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	{
 		offsets.push_back(currentOffset);
 		kernelPasswords.insert(kernelPasswords.end(), password.begin(), password.end());
-		kernelPasswords.push_back('\0');
-		currentOffset += password.size() + 1;
+		currentOffset += password.size();
 	}
 
 	cl_mem passwordsBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -157,7 +156,7 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	assert(clResult == CL_SUCCESS);
 
 	cl_mem crackedIdxBuffer =
-		clCreateBuffer(clStuffContainer.context, CL_MEM_KERNEL_READ_AND_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(int),
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(int),
 					   &crackedIdx, &clResult);
 
 	assert(clResult == CL_SUCCESS);
@@ -165,16 +164,19 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
 
 	size_t N = passwords.size();
+    size_t charCount = kernelPasswords.size();
 
 	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &passwordsBuffer);
 	assert(clResult == CL_SUCCESS);
 	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &offsetsBuffer);
 	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 1, sizeof(uint), &N);
+	clResult = clSetKernelArg(kernel, 2, sizeof(uint), &N);
 	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 2, sizeof(cl_mem), &targetHashBuffer);
+	clResult = clSetKernelArg(kernel, 3, sizeof(uint), &charCount);
 	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 3, sizeof(cl_mem), &crackedIdxBuffer);
+	clResult = clSetKernelArg(kernel, 4, sizeof(cl_mem), &targetHashBuffer);
+	assert(clResult == CL_SUCCESS);
+	clResult = clSetKernelArg(kernel, 5, sizeof(cl_mem), &crackedIdxBuffer);
 	assert(clResult == CL_SUCCESS);
 
 	size_t globalSize = N;
@@ -206,14 +208,17 @@ int main(int argc, char *argv[])
 		if (crackedIdx == -1)
 		{
 			std::cout << "Password not found!\n";
+            return 0;
 		}
 		else if ((size_t)crackedIdx >= passwords.size())
 		{
 			std::cout << "Password out of bounds!\n"
 					  << "Given cracked idx " << crackedIdx << " >= " << passwords.size() << "\n";
+            return -1;
 		}
 
 		std::cout << "Password cracked at index " << crackedIdx << ": " << passwords[crackedIdx] << "\n";
+        return 0;
 	}
 	else
 	{

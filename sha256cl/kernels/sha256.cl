@@ -20,19 +20,46 @@ __constant uint k[] = {0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25
 // apstrādā vienu, konkrētu 512 bitu bloku
 // 'input' satur apstrādājamo bitu bloku
 // 'hash_output' ir 8 skaitļu masīvs, kas apstrādes beigās saturēs hash vērtību
-void sha256(const uchar *input, __local uint *hash_output)
+// izvada 0, ja viss ok, -1, ja nav ok
+int sha256(__const uchar *input, uint length, uint *hash_output)
 {
+	// vienkāršības pēc apstrādāsim viena bloka ietvaros, tāpēc, ņemot vērā ziņojuma garumu un padding,
+	// ziņojuma garums nedrīkst būt lielāks par 440 bitiem, lai viss ietilpstu vienā 512 bitu blokā
+	// https://crypto.stackexchange.com/questions/54852/what-happens-if-a-sha-256-input-is-too-long-longer-than-512-bits
+	if (length > (440 / 8))
+	{
+		return -1;
+	}
+
 	uint w[64];
 
 	// pirmie 32 biti kv. saknei no pirmajiem 8 pirmskaitļiem 2 - 19 (no daļas aiz komata)
-	uint h0 = 0x6a09e667;
-	uint h1 = 0xbb67ae85;
-	uint h2 = 0x3c6ef372;
-	uint h3 = 0xa54ff53a;
-	uint h4 = 0x510e527f;
-	uint h5 = 0x9b05688c;
-	uint h6 = 0x1f83d9ab;
-	uint h7 = 0x5be0cd19;
+	hash_output[0] = 0x6a09e667;
+	hash_output[1] = 0xbb67ae85;
+	hash_output[2] = 0x3c6ef372;
+	hash_output[3] = 0xa54ff53a;
+	hash_output[4] = 0x510e527f;
+	hash_output[5] = 0x9b05688c;
+	hash_output[6] = 0x1f83d9ab;
+	hash_output[7] = 0x5be0cd19;
+
+	uchar chunk[64] = {0};
+
+	// iekopē ievades tekstu
+	for (int i = 0; i < length; i++)
+	{
+		chunk[i] = input[i];
+	}
+
+	// pēc prasībām ir jāpieliek '1' bits, pārējās baita vērtības attiecīgi ir nulles, atbilstoši SHA mainīgā 'K'
+	// prasībām
+	chunk[length] = 0b10000000;
+
+	// padding galā jāpieliek ziņojuma garums kā 64 bitu big-endian skaitlis
+	for (int i = 1; i <= 8; i++)
+	{
+		chunk[64 - i] = ((length * 8) >> ((i - 1) * 8)) & 0xFF;
+	}
 
 	// iekopē visus 512 bitus iekš w masīva (512/32 = 16 vērtības)
 	// baiti jāieliek iekš 32 bitu vārdiem, lai pirmais baits būtu pirmais (skatoties no kreisās uz labo pusi),
@@ -40,10 +67,10 @@ void sha256(const uchar *input, __local uint *hash_output)
 	// attiecīgā solī nākamie 'mazāksvarīgie' biti ir nulles, tāpēc baitus šos baitus var konkatenēt ar OR (|) operatoru
 	for (int i = 0; i < 16; i++)
 	{
-		w[i] = input[i * 4 + 0] << 24;
-		w[i] |= input[i * 4 + 1] << 16;
-		w[i] |= input[i * 4 + 2] << 8;
-		w[i] |= input[i * 4 + 3];
+		w[i] = chunk[i * 4 + 0] << 24;
+		w[i] |= chunk[i * 4 + 1] << 16;
+		w[i] |= chunk[i * 4 + 2] << 8;
+		w[i] |= chunk[i * 4 + 3];
 	}
 
 	// aizpilda pārējas 'w' vērtības
@@ -52,14 +79,14 @@ void sha256(const uchar *input, __local uint *hash_output)
 		w[i] = w[i - 16] + SS0(w[i - 15]) + w[i - 7] + SS1(w[i - 2]);
 	}
 
-	uint a = h0;
-	uint b = h1;
-	uint c = h2;
-	uint d = h3;
-	uint e = h4;
-	uint f = h5;
-	uint g = h6;
-	uint h = h7;
+	uint a = hash_output[0];
+	uint b = hash_output[1];
+	uint c = hash_output[2];
+	uint d = hash_output[3];
+	uint e = hash_output[4];
+	uint f = hash_output[5];
+	uint g = hash_output[6];
+	uint h = hash_output[7];
 
 	for (int i = 0; i < 64; i++)
 	{
@@ -83,31 +110,43 @@ void sha256(const uchar *input, __local uint *hash_output)
 	hash_output[5] += f;
 	hash_output[6] += g;
 	hash_output[7] += h;
+
+	return 0;
 }
 
-__kernel void sha256_crack(__local const char *passwords, __local const size_t *offsets, const uint password_count,
-						   __local const uint *target_hash, __global atomic_int *cracked_idx)
+size_t current_pw_size( __const uint *offsets, __const uint password_count, __const uint char_count, uint idx)
+{
+	// not the last password
+	if (idx < password_count - 1)
+	{
+		return offsets[idx + 1] - offsets[idx];
+	}
+	// last password, therefore we can't use the next offset
+	else
+	{
+		return char_count - offsets[idx];
+	}
+}
+
+__kernel void sha256_crack(__global __const uchar *passwords, __global __const uint *offsets,
+						   __const uint password_count, __const uint char_count, __global __const uint *target_hash,
+						   __global atomic_int *cracked_idx)
 
 {
-	uint idx = get_global_id(0);
+	size_t idx = get_global_id(0);
 
 	if (idx >= password_count)
 	{
 		return;
 	}
 
-	__local const char *my_password = passwords + offsets[idx];
+	__const uchar *my_password = passwords + offsets[idx];
 
-	uint input[16] = {0};
+	size_t pw_size = current_pw_size(offsets, password_count, char_count, idx);
 
-	for (int i = 0; my_password[i] != '\0' && i < 64; i++)
-	{
-		((uchar *)input)[i] = my_password[i];
-	}
+	uint hash[8] = {0};
 
-	__local uint hash[8];
-
-    sha256(input, hash);
+	int sha_result = sha256(my_password, pw_size, hash);
 
 	bool match = true;
 
@@ -122,6 +161,6 @@ __kernel void sha256_crack(__local const char *passwords, __local const size_t *
 
 	if (match)
 	{
-		int expected = -1;
+		atomic_store(cracked_idx, idx);
 	}
 }
