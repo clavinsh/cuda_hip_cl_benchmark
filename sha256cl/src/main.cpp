@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <ostream>
 #include <sstream>
@@ -51,13 +52,13 @@ std::vector<std::string> passwordsfromFile(const std::string &fileName)
 // 	return false;
 // }
 
-static uint8_t parseHexByte(const std::string &hexHash, int offset)
+static cl_uchar parseHexByte(const std::string &hexHash, int offset)
 {
 	std::string hexByteString = hexHash.substr(offset, 2);
-	return static_cast<uint8_t>(std::stoi(hexByteString, nullptr, 16));
+	return static_cast<cl_uchar>(std::stoi(hexByteString, nullptr, 16));
 }
 
-std::vector<uint8_t> hexStringToBytes(const std::string &hexHash)
+std::vector<cl_uchar> hexStringToBytes(const std::string &hexHash)
 {
 	// 256 biti => 64 hex skaitļi
 	if (hexHash.size() != 64)
@@ -65,15 +66,27 @@ std::vector<uint8_t> hexStringToBytes(const std::string &hexHash)
 		throw std::runtime_error("SHA-256 hash as a hex string must be exactly 64 characters!");
 	}
 
-	std::vector<uint8_t> hash(32);
+	std::vector<cl_uchar> hash(32);
 
 	for (int i = 0; i < 32; i++)
 	{
-
 		hash[i] = parseHexByte(hexHash, i * 2);
 	}
 
 	return hash;
+}
+
+std::string bytesToHexString(std::vector<cl_uchar> &bytes)
+{
+	std::stringstream ss;
+	ss << std::hex << std::setfill('0');
+
+	for (const cl_uchar byte : bytes)
+	{
+		ss << std::setw(2) << static_cast<int>(byte);
+	}
+
+	return ss.str();
 }
 
 class ClStuffContainer
@@ -127,13 +140,17 @@ class ClStuffContainer
 	}
 };
 
-int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<uint8_t> &hash)
+int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords,
+			  std::vector<cl_uchar> &hash)
 {
+	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
+	assert(hash.size() * sizeof(cl_uchar) == 32);
+
 	cl_int clResult;
 
-	std::vector<char> kernelPasswords;
-	std::vector<uint32_t> offsets;
-	int crackedIdx = -1;
+	std::vector<cl_uchar> kernelPasswords;
+	std::vector<cl_uint> offsets;
+	cl_int crackedIdx = -1;
 
 	int currentOffset = 0;
 	for (const auto &password : passwords)
@@ -143,36 +160,36 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 		currentOffset += password.size();
 	}
 
-	cl_mem passwordsBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-											kernelPasswords.size() * sizeof(char), kernelPasswords.data(), &clResult);
+	cl_mem passwordsBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+					   kernelPasswords.size() * sizeof(cl_uchar), kernelPasswords.data(), &clResult);
 	assert(clResult == CL_SUCCESS);
 
 	cl_mem offsetsBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										  offsets.size() * sizeof(size_t), offsets.data(), &clResult);
+										  offsets.size() * sizeof(cl_uint), offsets.data(), &clResult);
 	assert(clResult == CL_SUCCESS);
 
 	cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-											 hash.size() * sizeof(uint8_t), hash.data(), &clResult);
+											 hash.size() * sizeof(cl_uchar), hash.data(), &clResult);
 	assert(clResult == CL_SUCCESS);
 
-	cl_mem crackedIdxBuffer =
-		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(int),
-					   &crackedIdx, &clResult);
+	cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+											 sizeof(cl_int), &crackedIdx, &clResult);
 
 	assert(clResult == CL_SUCCESS);
 
-	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
+	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256_v2.cl", "sha256_crack");
 
-	size_t N = passwords.size();
-    size_t charCount = kernelPasswords.size();
+	cl_uint N = passwords.size();
+	cl_uint charCount = kernelPasswords.size();
 
 	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &passwordsBuffer);
 	assert(clResult == CL_SUCCESS);
 	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &offsetsBuffer);
 	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 2, sizeof(uint), &N);
+	clResult = clSetKernelArg(kernel, 2, sizeof(cl_uint), &N);
 	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 3, sizeof(uint), &charCount);
+	clResult = clSetKernelArg(kernel, 3, sizeof(cl_uint), &charCount);
 	assert(clResult == CL_SUCCESS);
 	clResult = clSetKernelArg(kernel, 4, sizeof(cl_mem), &targetHashBuffer);
 	assert(clResult == CL_SUCCESS);
@@ -199,7 +216,7 @@ int main(int argc, char *argv[])
 		const std::string hexHash = argv[2];
 
 		std::vector<std::string> passwords = passwordsfromFile(inputFileName);
-		std::vector<uint8_t> hash = hexStringToBytes(hexHash);
+		std::vector<cl_uchar> hash = hexStringToBytes(hexHash);
 
 		ClStuffContainer clStuffContainer;
 
@@ -208,17 +225,17 @@ int main(int argc, char *argv[])
 		if (crackedIdx == -1)
 		{
 			std::cout << "Password not found!\n";
-            return 0;
+			return 0;
 		}
 		else if ((size_t)crackedIdx >= passwords.size())
 		{
 			std::cout << "Password out of bounds!\n"
 					  << "Given cracked idx " << crackedIdx << " >= " << passwords.size() << "\n";
-            return -1;
+			return -1;
 		}
 
 		std::cout << "Password cracked at index " << crackedIdx << ": " << passwords[crackedIdx] << "\n";
-        return 0;
+		return 0;
 	}
 	else
 	{

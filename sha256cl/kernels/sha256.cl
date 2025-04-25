@@ -21,7 +21,7 @@ __constant uint k[] = {0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25
 // 'input' satur apstrādājamo bitu bloku
 // 'hash_output' ir 8 skaitļu masīvs, kas apstrādes beigās saturēs hash vērtību
 // izvada 0, ja viss ok, -1, ja nav ok
-int sha256(__const uchar *input, uint length, uint *hash_output)
+int sha256(__constant uchar *input, uint length, uint *hash_output)
 {
 	// vienkāršības pēc apstrādāsim viena bloka ietvaros, tāpēc, ņemot vērā ziņojuma garumu un padding,
 	// ziņojuma garums nedrīkst būt lielāks par 440 bitiem, lai viss ietilpstu vienā 512 bitu blokā
@@ -114,7 +114,7 @@ int sha256(__const uchar *input, uint length, uint *hash_output)
 	return 0;
 }
 
-size_t current_pw_size( __const uint *offsets, __const uint password_count, __const uint char_count, uint idx)
+size_t current_pw_size(__constant uint *offsets, uint password_count, uint char_count, uint idx)
 {
 	// not the last password
 	if (idx < password_count - 1)
@@ -128,8 +128,8 @@ size_t current_pw_size( __const uint *offsets, __const uint password_count, __co
 	}
 }
 
-__kernel void sha256_crack(__global __const uchar *passwords, __global __const uint *offsets,
-						   __const uint password_count, __const uint char_count, __global __const uint *target_hash,
+__kernel void sha256_crack(__constant uchar *passwords, __constant uint *offsets,
+						   uint password_count, uint char_count, __constant uint *target_hash,
 						   __global atomic_int *cracked_idx)
 
 {
@@ -140,7 +140,7 @@ __kernel void sha256_crack(__global __const uchar *passwords, __global __const u
 		return;
 	}
 
-	__const uchar *my_password = passwords + offsets[idx];
+	__constant uchar *my_password = passwords + offsets[idx];
 
 	size_t pw_size = current_pw_size(offsets, password_count, char_count, idx);
 
