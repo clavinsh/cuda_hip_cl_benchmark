@@ -2,7 +2,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -47,18 +46,8 @@ std::vector<std::string> passwordsfromFile(const std::string &fileName)
 	return output;
 }
 
-// bool testSha(const std::string &password, const std::string hexExpectedHash)
-// {
-// 	return false;
-// }
 
-static cl_uchar parseHexByte(const std::string &hexHash, int offset)
-{
-	std::string hexByteString = hexHash.substr(offset, 2);
-	return static_cast<cl_uchar>(std::stoi(hexByteString, nullptr, 16));
-}
-
-std::vector<cl_uchar> hexStringToBytes(const std::string &hexHash)
+std::vector<cl_uint> hexStringToBytes(const std::string &hexHash)
 {
 	// 256 biti => 64 hex skaitļi
 	if (hexHash.size() != 64)
@@ -66,24 +55,32 @@ std::vector<cl_uchar> hexStringToBytes(const std::string &hexHash)
 		throw std::runtime_error("SHA-256 hash as a hex string must be exactly 64 characters!");
 	}
 
-	std::vector<cl_uchar> hash(32);
+	std::vector<cl_uint> hash;
 
-	for (int i = 0; i < 32; i++)
+	// Process every 8 hex digits (32 bits) to create a uint32_t
+	for (size_t i = 0; i < hexHash.length(); i += 8)
 	{
-		hash[i] = parseHexByte(hexHash, i * 2);
+		std::string chunk = hexHash.substr(i, 8);
+		std::stringstream ss;
+		uint32_t value;
+
+		ss << std::hex << chunk;
+		ss >> value;
+
+		hash.push_back(value);
 	}
 
 	return hash;
 }
 
-std::string bytesToHexString(std::vector<cl_uchar> &bytes)
+std::string bytesToHexString(std::vector<cl_uint> &bytes)
 {
 	std::stringstream ss;
 	ss << std::hex << std::setfill('0');
 
 	for (const cl_uchar byte : bytes)
 	{
-		ss << std::setw(2) << static_cast<int>(byte);
+		ss << std::setw(8) << byte; 
 	}
 
 	return ss.str();
@@ -140,11 +137,10 @@ class ClStuffContainer
 	}
 };
 
-int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords,
-			  std::vector<cl_uchar> &hash)
+int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
-	assert(hash.size() * sizeof(cl_uchar) == 32);
+	assert(hash.size() * sizeof(cl_uint) == 32);
 
 	cl_int clResult;
 
@@ -170,7 +166,7 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	assert(clResult == CL_SUCCESS);
 
 	cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-											 hash.size() * sizeof(cl_uchar), hash.data(), &clResult);
+											 hash.size() * sizeof(cl_uint), hash.data(), &clResult);
 	assert(clResult == CL_SUCCESS);
 
 	cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
@@ -216,7 +212,7 @@ int main(int argc, char *argv[])
 		const std::string hexHash = argv[2];
 
 		std::vector<std::string> passwords = passwordsfromFile(inputFileName);
-		std::vector<cl_uchar> hash = hexStringToBytes(hexHash);
+		std::vector<cl_uint> hash = hexStringToBytes(hexHash);
 
 		ClStuffContainer clStuffContainer;
 
