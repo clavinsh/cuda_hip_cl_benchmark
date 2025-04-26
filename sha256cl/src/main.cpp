@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -46,7 +47,6 @@ std::vector<std::string> passwordsfromFile(const std::string &fileName)
 	return output;
 }
 
-
 std::vector<cl_uint> hexStringToBytes(const std::string &hexHash)
 {
 	// 256 biti => 64 hex skaitļi
@@ -80,7 +80,7 @@ std::string bytesToHexString(std::vector<cl_uint> &bytes)
 
 	for (const cl_uchar byte : bytes)
 	{
-		ss << std::setw(8) << byte; 
+		ss << std::setw(8) << byte;
 	}
 
 	return ss.str();
@@ -137,6 +137,7 @@ class ClStuffContainer
 	}
 };
 
+
 int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
@@ -174,7 +175,7 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 
 	assert(clResult == CL_SUCCESS);
 
-	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256_v2.cl", "sha256_crack");
+	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
 
 	cl_uint N = passwords.size();
 	cl_uint charCount = kernelPasswords.size();
@@ -226,19 +227,16 @@ int main(int argc, char *argv[])
 		else if ((size_t)crackedIdx >= passwords.size())
 		{
 			std::cout << "Password out of bounds!\n"
-					  << "Given cracked idx " << crackedIdx << " >= " << passwords.size() << "\n";
+					  << "Given found index " << crackedIdx << " >= " << passwords.size() << "\n";
 			return -1;
 		}
 
-		std::cout << "Password cracked at index " << crackedIdx << ": " << passwords[crackedIdx] << "\n";
+		std::cout << "Password found at index " << crackedIdx << ": " << passwords[crackedIdx] << "\n";
 		return 0;
 	}
 	else
 	{
 		std::cout << "Correct program usage:\n"
-				  << "\tRunning tests:\n"
-				  << "\t\t" << argv[0] << " --test\n"
-				  << "\tPassword cracking:\n"
 				  << "\t\t" << argv[0] << " <passwords file> <password hash>\n";
 		return -1;
 	}
