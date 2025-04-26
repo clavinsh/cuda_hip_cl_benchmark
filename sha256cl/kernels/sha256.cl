@@ -30,12 +30,12 @@ __constant uint h7 = 0x5be0cd19;
 
 int sha256(__constant uchar *input, uint length, uint *hash)
 {
-    // ar esošo implementāciju nebūs iespējams iegūt pareizu hešu, 
-    // ja input garāks par šo garumu
-    if(length >= 54)
-    {
-        return -1;
-    }
+	// ar esošo implementāciju nebūs iespējams iegūt pareizu hešu,
+	// ja input garāks par šo garumu
+	if (length >= 54)
+	{
+		return -1;
+	}
 
 	uint w[64];
 
@@ -106,17 +106,17 @@ int sha256(__constant uchar *input, uint length, uint *hash)
 	hash[6] = g + h6;
 	hash[7] = h + h7;
 
-    return 0;
+	return 0;
 }
 
 size_t current_pw_size(__constant uint *offsets, uint password_count, uint char_count, uint idx)
 {
-    // paroļu buferis nesatur \0 simbolus, tāpēc jānosaka paroles garums pēc offsetiem
+	// paroļu buferis nesatur \0 simbolus, tāpēc jānosaka paroles garums pēc offsetiem
 	if (idx < password_count - 1)
 	{
 		return offsets[idx + 1] - offsets[idx];
 	}
-    // pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
+	// pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
 	else
 	{
 		return char_count - offsets[idx];
@@ -141,11 +141,11 @@ __kernel void sha256_crack(__constant uchar *passwords, __constant uint *offsets
 
 	int result = sha256(my_password, pw_size, hash);
 
-    if(result != 0)
-    {
-        printf("Invalid input at idx: %d, possibly too long!\n", idx);
-        return;
-    }
+	if (result != 0)
+	{
+		printf("Invalid input at idx: %d, possibly too long!\n", idx);
+		return;
+	}
 
 	bool match = true;
 

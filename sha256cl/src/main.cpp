@@ -137,7 +137,6 @@ class ClStuffContainer
 	}
 };
 
-
 int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
