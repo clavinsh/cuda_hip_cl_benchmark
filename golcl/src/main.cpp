@@ -281,14 +281,16 @@ class ClStuffContainer
 	}
 };
 
-std::vector<cl_uchar> GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<uint8_t> grid, size_t width,
-									 size_t height)
+// funkcija, kas sakārto visu kodola izpildei un datu savākšanai
+// outputGrid izmēru saucēja fn var nenoteikt, jo šī pati funkcija sakārtos atmiņu
+void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &grid, std::vector<cl_uchar> &outputGrid,
+					size_t width, size_t height)
 {
 	cl_int clResult;
 
 	size_t gridSize = grid.size();
 
-	std::vector<cl_uchar> outputGrid(gridSize);
+	outputGrid.resize(gridSize);
 
 	cl_mem gridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 									   gridSize * sizeof(uint8_t), grid.data(), &clResult);
@@ -305,9 +307,9 @@ std::vector<cl_uchar> GameOfLifeStep(ClStuffContainer &clStuffContainer, std::ve
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputGridBuffer);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 2, sizeof(cl_uint), &width);
+	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 3, sizeof(cl_uint), &height);
+	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 	size_t globalSize = gridSize;
@@ -320,7 +322,8 @@ std::vector<cl_uchar> GameOfLifeStep(ClStuffContainer &clStuffContainer, std::ve
 								   outputGrid.data(), 0, nullptr, nullptr);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-	return outputGrid;
+	clReleaseMemObject(gridBuffer);
+	clReleaseMemObject(outputGridBuffer);
 }
 
 int main(int argc, char *argv[])
@@ -331,9 +334,9 @@ int main(int argc, char *argv[])
 
 		size_t width;
 		size_t height;
-		std::vector<uint8_t> grid = loadGridFromFile(inputFileName, width, height);
+		std::vector<cl_uchar> grid = loadGridFromFile(inputFileName, width, height);
 
-		std::cout << "Input grid:\n";
+		std::cout << "Input grid (" << width << "x" << height << "):\n";
 
 		for (size_t h = 0; h < height; h++)
 		{
@@ -343,9 +346,12 @@ int main(int argc, char *argv[])
 			}
 			std::cout << "\n";
 		}
+
+		std::vector<cl_uchar> outputGrid;
+
 		ClStuffContainer clStuffContainer;
 
-		std::vector<cl_uchar> outputGrid = GameOfLifeStep(clStuffContainer, grid, width, height);
+		GameOfLifeStep(clStuffContainer, grid, outputGrid, width, height);
 
 		std::cout << "Output grid:\n";
 

@@ -1,73 +1,72 @@
 // Conway's Game of Life implementācija
 
-uchar neighborCount(__constant uchar *grid, size_t width, size_t height, size_t x, size_t y)
+int neighborCount(__constant uchar *grid, size_t width, size_t height, size_t x, size_t y)
 {
-    uchar neighbors = 0;
+	int neighbors = 0;
 
-    for (size_t h = (y - 1); h <= (y+1); h++)
-    {
-        if (h < 0)
-        {
-            continue;
-        }
+	for (size_t diff_y = 0; diff_y < 3; diff_y++)
+	{
+		size_t h = y + diff_y - 1;
 
-        if (h >= height)
-        {
-            continue;
-        }
+		if (h >= height)
+		{
+			continue;
+		}
 
-        for (size_t w = (x - 1); w <= (x + 1); w++)
-        {
-            if (w < 0)
-            {
-                continue;
-            }
+		for (size_t diff_x = 0; diff_x < 3; diff_x++)
+		{
+			size_t w = x + diff_x - 1;
 
-            if (w >= width)
-            {
-                continue;
-            }
+			if (w >= width)
+			{
+				continue;
+			}
 
-            if (grid[h * width + w] == 1)
-            {
-                neighbors++;
-            }
-        }
-    }
+			if (diff_x == 1 && diff_y == 1)
+			{
+				continue;
+			}
 
-    return neighbors;
+			if (grid[h * width + w] == 1)
+			{
+				neighbors++;
+			}
+		}
+	}
+
+	return neighbors;
 }
-
 
 __kernel void gol(__constant uchar *grid, __global uchar *output_grid, ulong width, ulong height)
 {
-    size_t x = get_global_id(0);
-    size_t y = get_global_id(1);
+	size_t idx = get_global_id(0);
 
-    if(x >= width || y >= height)
-    {
-        return;
-    }
+	if (idx >= width * height)
+	{
+		return;
+	}
 
-    uchar neighbors = neighborCount(grid, width, height, x, y);
+	size_t x = idx % width;
+	size_t y = idx / width;
 
-    size_t flat_buffer_idx = width * y + x;
-    uchar cell = 0;
+	int neighbors = neighborCount(grid, width, height, x, y);
 
-    if(grid[flat_buffer_idx] == 1)
-    {
-        if (neighbors == 2 || neighbors == 3)
-        {
-            cell = 1;
-        }
-    }
-    else
-    {
-        if (neighbors == 3)
-        {
-            cell = 1;
-        }
-    }
+	uchar cell = 0;
 
-    output_grid[flat_buffer_idx] = cell;
+	if (grid[idx] == 1)
+	{
+		if (neighbors == 2 || neighbors == 3)
+		{
+			cell = 1;
+		}
+	}
+	else
+	{
+		if (neighbors == 3)
+		{
+			cell = 1;
+		}
+	}
+
+	output_grid[idx] = cell;
 }
