@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // makro assertam ar ziņojumu
@@ -284,7 +285,7 @@ class ClStuffContainer
 // funkcija, kas sakārto visu kodola izpildei un datu savākšanai
 // outputGrid izmēru saucēja fn var nenoteikt, jo šī pati funkcija sakārtos atmiņu
 void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &grid, std::vector<cl_uchar> &outputGrid,
-					size_t width, size_t height)
+					size_t width, size_t height, size_t steps)
 {
 	cl_int clResult;
 
@@ -294,7 +295,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	cl_mem gridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 									   gridSize * sizeof(uint8_t), grid.data(), &clResult);
-
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 	cl_mem outputGridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
@@ -303,20 +303,26 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
 
-	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &gridBuffer);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputGridBuffer);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	for (size_t step = 0; step < steps; step++)
+	{
 
-	size_t globalSize = gridSize;
+		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &gridBuffer);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputGridBuffer);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-	clResult =
-		clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		size_t globalSize = gridSize;
+
+		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr,
+										  nullptr);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+		std::swap(gridBuffer, outputGridBuffer);
+	}
 
 	clResult = clEnqueueReadBuffer(clStuffContainer.queue, outputGridBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
 								   outputGrid.data(), 0, nullptr, nullptr);
@@ -328,9 +334,10 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 int main(int argc, char *argv[])
 {
-	if (argc == 2)
+	if (argc == 3)
 	{
 		const std::string inputFileName = argv[1];
+		const size_t gameSteps = std::stoll(argv[2]);
 
 		size_t width;
 		size_t height;
@@ -351,7 +358,7 @@ int main(int argc, char *argv[])
 
 		ClStuffContainer clStuffContainer;
 
-		GameOfLifeStep(clStuffContainer, grid, outputGrid, width, height);
+		GameOfLifeStep(clStuffContainer, grid, outputGrid, width, height, gameSteps);
 
 		std::cout << "Output grid:\n";
 
@@ -367,7 +374,7 @@ int main(int argc, char *argv[])
 	else
 	{
 		std::cout << "Correct program usage:\n"
-				  << "\t\t" << argv[0] << " <grid file path>\n";
+				  << "\t\t" << argv[0] << " <grid file path> <game steps>\n";
 	}
 	return 0;
 }
