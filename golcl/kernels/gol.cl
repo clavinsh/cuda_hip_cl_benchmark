@@ -1,6 +1,6 @@
 // Conway's Game of Life implementācija
 
-int neighborCount(__constant uchar *grid, size_t width, size_t height, size_t x, size_t y)
+int neighborCount(__global const uchar *grid, size_t width, size_t height, size_t x, size_t y)
 {
 	int neighbors = 0;
 
@@ -37,7 +37,7 @@ int neighborCount(__constant uchar *grid, size_t width, size_t height, size_t x,
 	return neighbors;
 }
 
-__kernel void gol(__constant uchar *grid, __global uchar *output_grid, ulong width, ulong height)
+__kernel void gol(__global const uchar *grid, __global uchar *output_grid, ulong width, ulong height)
 {
 	size_t idx = get_global_id(0);
 

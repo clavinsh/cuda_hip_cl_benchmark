@@ -167,9 +167,9 @@ void processGridFileLine(std::vector<uint8_t> &grid, const std::string &line)
 
 // izveido flat grid masīvu, automātiski nosakot width, height
 // met ārā kļūdas ja nav atbilstošu simbolu (1, 0) vai ja kāda rindiņa nesatur tādu pašu simbolu skaitu kā pirmā
-std::vector<uint8_t> loadGridFromFile(const std::string &fileName, size_t &width, size_t &height)
+std::vector<cl_uchar> loadGridFromFile(const std::string &fileName, size_t &width, size_t &height)
 {
-	std::vector<uint8_t> grid;
+	std::vector<cl_uchar> grid;
 	height = 0; // noteiks iteratīvi pēc rindiņu skaita failā, tāpēc sākumā 0
 
 	std::ifstream file(fileName);
@@ -285,16 +285,16 @@ class ClStuffContainer
 // funkcija, kas sakārto visu kodola izpildei un datu savākšanai
 // outputGrid izmēru saucēja fn var nenoteikt, jo šī pati funkcija sakārtos atmiņu
 void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &grid, std::vector<cl_uchar> &outputGrid,
-					size_t width, size_t height, size_t steps)
+					cl_ulong width, cl_ulong height, size_t steps)
 {
 	cl_int clResult;
 
-	size_t gridSize = grid.size();
+	size_t gridSize = width * height;
 
 	outputGrid.resize(gridSize);
 
 	cl_mem gridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-									   gridSize * sizeof(uint8_t), grid.data(), &clResult);
+									   gridSize * sizeof(cl_uchar), grid.data(), &clResult);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 	cl_mem outputGridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
@@ -303,25 +303,29 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
 
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	cl_mem inputBuffer = gridBuffer;
+	cl_mem outputBuffer = outputGridBuffer;
+
+    size_t localSize = 256;
+    size_t globalSize = ((gridSize + localSize - 1) / localSize) * localSize;
+
 	for (size_t step = 0; step < steps; step++)
 	{
+		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &inputBuffer);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputBuffer);
 
-		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &gridBuffer);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputGridBuffer);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-		clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-		clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
+		clResult =
+			clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0, nullptr, nullptr);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-		size_t globalSize = gridSize;
-
-		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr,
-										  nullptr);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		std::swap(gridBuffer, outputGridBuffer);
+		std::swap(inputBuffer, outputBuffer);
 	}
 
 	clResult = clEnqueueReadBuffer(clStuffContainer.queue, outputGridBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
@@ -358,7 +362,15 @@ int main(int argc, char *argv[])
 
 		ClStuffContainer clStuffContainer;
 
-		GameOfLifeStep(clStuffContainer, grid, outputGrid, width, height, gameSteps);
+        size_t maxWorkItems;
+        clGetDeviceInfo(clStuffContainer.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkItems, nullptr);
+
+        std::cout << "maxWorkItems: " << maxWorkItems << "\n";
+
+		cl_ulong w = static_cast<cl_ulong>(width);
+		cl_ulong h = static_cast<cl_ulong>(height);
+
+		GameOfLifeStep(clStuffContainer, grid, outputGrid, w, h, gameSteps);
 
 		std::cout << "Output grid:\n";
 
