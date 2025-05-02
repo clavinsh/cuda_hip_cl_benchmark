@@ -211,6 +211,31 @@ std::vector<cl_uchar> loadGridFromFile(const std::string &fileName, size_t &widt
 	return grid;
 }
 
+void writeGridToFile(std::vector<cl_uchar> &grid, cl_ulong width, cl_ulong height, std::string fileName)
+{
+	std::ofstream file(fileName);
+	if (!file.is_open())
+	{
+		throw std::runtime_error("Failed to open file: " + fileName);
+	}
+
+	std::string line;
+
+	line.reserve(width + 1);
+
+	for (size_t h = 0; h < height; h++)
+	{
+		line.clear();
+		for (size_t w = 0; w < width; w++)
+		{
+			line += std::to_string(static_cast<int>(grid[h * width + w]));
+		}
+		line += "\n";
+
+		file.write(line.data(), line.size());
+	}
+}
+
 // funkcija paredzēta OpenCL kodolu failu atvēršanai un satura (pirmkoda) iegūšanai
 std::string readKernelFile(const std::string &fileName)
 {
@@ -248,7 +273,9 @@ class ClStuffContainer
 		context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &clResult);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-		queue = clCreateCommandQueueWithProperties(context, device, nullptr, &clResult);
+		const cl_queue_properties properties[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
+
+		queue = clCreateCommandQueueWithProperties(context, device, properties, &clResult);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 	}
 
@@ -302,7 +329,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
-
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
@@ -312,8 +338,10 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 	cl_mem inputBuffer = gridBuffer;
 	cl_mem outputBuffer = outputGridBuffer;
 
-    size_t localSize = 256;
-    size_t globalSize = ((gridSize + localSize - 1) / localSize) * localSize;
+	size_t localSize = 256;
+	size_t globalSize = ((gridSize + localSize - 1) / localSize) * localSize;
+
+	double totalTime = 0;
 
 	for (size_t step = 0; step < steps; step++)
 	{
@@ -321,13 +349,26 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputBuffer);
 
-		clResult =
-			clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0, nullptr, nullptr);
+		cl_event profilingEvent;
+
+		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0,
+										  nullptr, &profilingEvent);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clFinish(clStuffContainer.queue);
+
+		cl_ulong start;
+		cl_ulong end;
+
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
+
+		totalTime += (double)(end - start);
 
 		std::swap(inputBuffer, outputBuffer);
 	}
-
+	// totalTime ir nanosekundēs
+	std::cout << "Total exec time: " << (totalTime / 1e6) << "ms\n";
+	std::cout << "Average kernel exec time: " << ((totalTime / steps) / 1e6) << "ms\n";
 	clResult = clEnqueueReadBuffer(clStuffContainer.queue, outputGridBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
 								   outputGrid.data(), 0, nullptr, nullptr);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
@@ -338,55 +379,36 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 int main(int argc, char *argv[])
 {
-	if (argc == 3)
+	if (argc == 4)
 	{
 		const std::string inputFileName = argv[1];
-		const size_t gameSteps = std::stoll(argv[2]);
+		const std::string outputFileName = argv[2];
+		const size_t gameSteps = std::stoll(argv[3]);
 
 		size_t width;
 		size_t height;
 		std::vector<cl_uchar> grid = loadGridFromFile(inputFileName, width, height);
 
-		std::cout << "Input grid (" << width << "x" << height << "):\n";
-
-		for (size_t h = 0; h < height; h++)
-		{
-			for (size_t w = 0; w < width; w++)
-			{
-				std::cout << std::to_string(grid[h * width + w]);
-			}
-			std::cout << "\n";
-		}
-
 		std::vector<cl_uchar> outputGrid;
 
 		ClStuffContainer clStuffContainer;
 
-        size_t maxWorkItems;
-        clGetDeviceInfo(clStuffContainer.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkItems, nullptr);
-
-        std::cout << "maxWorkItems: " << maxWorkItems << "\n";
+		size_t maxWorkItems;
+		clGetDeviceInfo(clStuffContainer.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkItems, nullptr);
 
 		cl_ulong w = static_cast<cl_ulong>(width);
 		cl_ulong h = static_cast<cl_ulong>(height);
 
+		std::cout << "Processing a " << width << "x" << height << " grid with " << gameSteps << " steps\n";
+
 		GameOfLifeStep(clStuffContainer, grid, outputGrid, w, h, gameSteps);
 
-		std::cout << "Output grid:\n";
-
-		for (size_t h = 0; h < height; h++)
-		{
-			for (size_t w = 0; w < width; w++)
-			{
-				std::cout << std::to_string(outputGrid[h * width + w]);
-			}
-			std::cout << "\n";
-		}
+		writeGridToFile(outputGrid, width, height, outputFileName);
 	}
 	else
 	{
 		std::cout << "Correct program usage:\n"
-				  << "\t\t" << argv[0] << " <grid file path> <game steps>\n";
+				  << "\t\t" << argv[0] << " <grid file path> <output grid file path> <game steps>\n";
 	}
 	return 0;
 }
