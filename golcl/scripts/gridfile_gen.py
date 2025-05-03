@@ -4,24 +4,25 @@ import random
 import string
 import argparse
 
-def generate_grid(width, height):
-    return [[str(random.randint(0, 1)) for _ in range(width)] for _ in range(height)]
+def generate_write_grid(width, height, output_file):
+    with open(output_file, "w", buffering=1024*1024*1024) as f:
+        write_f = f.write
+        randbit_f = random.getrandbits
 
-def save(grid, output_file):
-    with open(output_file, 'w') as f:
-        for row in grid:
-            f.write(''.join(row) + '\n')
+        line = ["0"] * width
+        for _ in range(height):
+            for i in range (width):
+                line[i] = "1" if randbit_f(1) else "0"
+            write_f("".join(line) + "\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate a Game Of Life containing random 1s and 0s.")
+    parser = argparse.ArgumentParser(description="Generate a Game Of Life grid c ontaining random 1s and 0s.")
     parser.add_argument("width", type=int, help="Grid width")
     parser.add_argument("height", type=int, help="Grid height")
     parser.add_argument("output_file", help="Path to the output file")
     
     args = parser.parse_args()
-    
-    grid = generate_grid(args.width, args.height)
-    save(grid, args.output_file)
+    generate_write_grid(args.width, args.height, args.output_file)   
 
 if __name__ == "__main__":
     main()
