@@ -133,7 +133,7 @@ std::string ClErrorCodesToString(cl_int clError)
 
 #undef CLERR
 
-	return "UNKOWN CL ERROR";
+	return "UNKOWN CL ERROR (value " + std::to_string(clError) + ")";
 }
 
 // debug vajadzībām
