@@ -313,9 +313,7 @@ class ClStuffContainer
 
 		auto end = std::chrono::steady_clock::now();
 
-		std::chrono::duration<double, std::milli> kernelCompileTime = end - start;
-
-		logger.log("kernel compile time", kernelCompileTime.count());
+		logger.chronoLog("kernel compile time", start, end);
 
 		return kernel;
 	}
@@ -344,9 +342,7 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	auto end = std::chrono::steady_clock::now();
 
-	std::chrono::duration<double, std::milli> bufferCreationTime = end - start;
-
-	logger.log("buffer creation time", bufferCreationTime.count());
+	logger.chronoLog("buffer creation time", start, end);
 
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
 
@@ -431,9 +427,7 @@ int main(int argc, char *argv[])
 
 		auto end = std::chrono::steady_clock::now();
 
-		std::chrono::duration<double, std::milli> gridLoadTime = end - start;
-
-		logger.log("grid load time", gridLoadTime.count());
+		logger.chronoLog("grid load time", start, end);
 
 		std::vector<cl_uchar> outputGrid;
 
@@ -443,9 +437,7 @@ int main(int argc, char *argv[])
 
 		auto clInitEnd = std::chrono::steady_clock::now();
 
-		std::chrono::duration<double, std::milli> clInitTime = clInitEnd - clInitStart;
-
-		logger.log("opencl init time", clInitTime.count());
+		logger.chronoLog("opencl init time", clInitStart, clInitEnd);
 
 		size_t maxWorkItems;
 		clGetDeviceInfo(clStuffContainer.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkItems, nullptr);
@@ -461,9 +453,7 @@ int main(int argc, char *argv[])
 
 		auto GoLEnd = std::chrono::steady_clock::now();
 
-		std::chrono::duration<double, std::milli> totalGolTime = GoLEnd - GoLStart;
-
-		logger.log("total game of life time", totalGolTime.count());
+		logger.chronoLog("total game of life time", GoLStart, GoLEnd);
 
 		auto writeGridToFileStart = std::chrono::steady_clock::now();
 
@@ -471,9 +461,7 @@ int main(int argc, char *argv[])
 
 		auto writeGridToFileEnd = std::chrono::steady_clock::now();
 
-		std::chrono::duration<double, std::milli> writeGridToFileTime = writeGridToFileEnd - writeGridToFileStart;
-
-		logger.log("write output grid to file time", writeGridToFileTime.count());
+		logger.chronoLog("write output grid to file time", writeGridToFileStart, writeGridToFileEnd);
 	}
 	else
 	{
