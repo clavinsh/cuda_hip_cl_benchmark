@@ -6,12 +6,14 @@ add_definitions(-DCL_TARGET_OPENCL_VERSION=300)
 
 find_package(OpenCL REQUIRED)
 
+find_package(spdlog REQUIRED)
+
 file(GLOB SRC_FILES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
+target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL spdlog::spdlog)
 
 target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror) 
 

@@ -1,3 +1,5 @@
+#include "clBenchmark.h"
+#include "clStuff.h"
 #include <CL/cl.h>
 #include <cassert>
 #include <cstddef>
@@ -5,27 +7,11 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <map>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-// funkcija paredzēta OpenCL kodolu failu atvēršanai un satura (pirmkoda) iegūšanai
-std::string readKernelFile(const std::string &fileName)
-{
-	std::ifstream file(fileName);
-	if (!file.is_open())
-	{
-		throw std::runtime_error("Failed to open kernel file: " + fileName);
-	}
-
-	std::stringstream sourceCodeBuffer;
-
-	sourceCodeBuffer << file.rdbuf();
-	return sourceCodeBuffer.str();
-}
 
 std::vector<std::string> passwordsfromFile(const std::string &fileName)
 {
@@ -86,58 +72,8 @@ std::string bytesToHexString(std::vector<cl_uint> &bytes)
 	return ss.str();
 }
 
-class ClStuffContainer
-{
-  public:
-	cl_int clResult; // paredzēts openCL funkciju izsaukumu rezultātu saglabāšanai un pārbaudei
-	cl_platform_id platform;
-	cl_device_id device;
-	cl_uint numPlatforms;
-	cl_uint numDevices;
-	cl_context context;
-	cl_command_queue queue;
-
-	ClStuffContainer()
-	{
-		clResult = clGetPlatformIDs(1, &platform, &numPlatforms);
-		assert(clResult == CL_SUCCESS);
-		clResult = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices);
-		assert(clResult == CL_SUCCESS);
-		context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &clResult);
-		assert(clResult == CL_SUCCESS);
-		queue = clCreateCommandQueueWithProperties(context, device, nullptr, &clResult);
-		assert(clResult == CL_SUCCESS);
-	}
-
-	~ClStuffContainer()
-	{
-
-		clResult = clReleaseCommandQueue(queue);
-		assert(clResult == CL_SUCCESS);
-		clResult = clReleaseContext(context);
-		assert(clResult == CL_SUCCESS);
-	}
-
-	cl_kernel loadAndCreateKernel(const std::string &fileName, const std::string &kernelName)
-	{
-		std::string kernelSource = readKernelFile(fileName);
-
-		const char *kernelSourceCstring = kernelSource.c_str();
-		size_t kernelSize = kernelSource.length();
-
-		cl_program program = clCreateProgramWithSource(context, 1, &kernelSourceCstring, &kernelSize, &clResult);
-		assert(clResult == CL_SUCCESS);
-
-		clResult = clBuildProgram(program, 1, &device, "-cl-std=CL3.0", nullptr, nullptr);
-		assert(clResult == CL_SUCCESS);
-
-		cl_kernel kernel = clCreateKernel(program, kernelName.c_str(), &clResult);
-		assert(clResult == CL_SUCCESS);
-		return kernel;
-	}
-};
-
-int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash)
+int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash,
+			  BenchmarkLogger &logger)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
 	assert(hash.size() * sizeof(cl_uint) == 32);
@@ -156,6 +92,8 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 		currentOffset += password.size();
 	}
 
+	auto bufferCreationStart = std::chrono::steady_clock::now();
+
 	cl_mem passwordsBuffer =
 		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 					   kernelPasswords.size() * sizeof(cl_uchar), kernelPasswords.data(), &clResult);
@@ -171,8 +109,11 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 
 	cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
 											 sizeof(cl_int), &crackedIdx, &clResult);
-
 	assert(clResult == CL_SUCCESS);
+
+	auto bufferCreationEnd = std::chrono::steady_clock::now();
+
+	logger.chronoLog("buffer creation time", bufferCreationStart, bufferCreationEnd);
 
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
 
@@ -192,10 +133,28 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 	clResult = clSetKernelArg(kernel, 5, sizeof(cl_mem), &crackedIdxBuffer);
 	assert(clResult == CL_SUCCESS);
 
-	size_t globalSize = N;
-	clResult =
-		clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
+	cl_event profilingEvent;
+
+	size_t kernelWorkGroupSize;
+	clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t),
+							 &kernelWorkGroupSize, nullptr);
+
+	size_t localSize = kernelWorkGroupSize;
+	size_t globalSize = ((N + localSize - 1) / localSize) * localSize;
+
+	clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0, nullptr,
+									  &profilingEvent);
 	assert(clResult == CL_SUCCESS);
+
+	cl_ulong start;
+	cl_ulong end;
+
+	clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+	clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
+
+	double kernelExecTime = static_cast<double>(end - start);
+
+	logger.log("kernel exec time", kernelExecTime / 1e6); // 1e6, lai dabūtu rezultātu milisekundēs
 
 	clResult = clEnqueueReadBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(int), &crackedIdx, 0,
 								   nullptr, nullptr);
@@ -206,17 +165,32 @@ int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string>
 
 int main(int argc, char *argv[])
 {
-	if (argc == 3)
+	if (argc == 4)
 	{
 		const std::string inputFileName = argv[1];
 		const std::string hexHash = argv[2];
+		const std::string logFileName = argv[3];
+
+		BenchmarkLogger logger(logFileName, "OpenCL");
+
+		auto pwFileStart = std::chrono::steady_clock::now();
 
 		std::vector<std::string> passwords = passwordsfromFile(inputFileName);
 		std::vector<cl_uint> hash = hexStringToBytes(hexHash);
 
-		ClStuffContainer clStuffContainer;
+		auto pwFileEnd = std::chrono::steady_clock::now();
 
-		int crackedIdx = hashCheck(clStuffContainer, passwords, hash);
+		logger.chronoLog("password file & hash processed", pwFileStart, pwFileEnd);
+
+		ClStuffContainer clStuffContainer(logger);
+
+		auto hashCheckStart = std::chrono::steady_clock::now();
+
+		int crackedIdx = hashCheck(clStuffContainer, passwords, hash, logger);
+
+		auto hashCheckEnd = std::chrono::steady_clock::now();
+
+		logger.chronoLog("total pw cracker kernel time", hashCheckStart, hashCheckEnd);
 
 		if (crackedIdx == -1)
 		{
@@ -236,7 +210,7 @@ int main(int argc, char *argv[])
 	else
 	{
 		std::cout << "Correct program usage:\n"
-				  << "\t\t" << argv[0] << " <passwords file> <password hash>\n";
+				  << "\t\t" << argv[0] << " <passwords file> <password hash> <log file>\n";
 		return -1;
 	}
 }
