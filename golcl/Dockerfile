@@ -8,6 +8,7 @@ RUN apt-get update                                  \
     ocl-icd-opencl-dev                              \
     opencl-headers                                  \
     clinfo                                          \
+    libspdlog-dev                                   \
     && rm -rf /var/lib/apt/lists/*
 
 # Smylinks priekš OpenCL

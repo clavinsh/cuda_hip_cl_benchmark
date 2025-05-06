@@ -1,13 +1,14 @@
+#include "clBenchmark.h"
 #include <CL/cl.h>
 #include <CL/cl_platform.h>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <map>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -253,6 +254,9 @@ std::string readKernelFile(const std::string &fileName)
 
 class ClStuffContainer
 {
+  private:
+	BenchmarkLogger &logger;
+
   public:
 	cl_int clResult; // paredzēts openCL funkciju izsaukumu rezultātu saglabāšanai un pārbaudei
 	cl_platform_id platform;
@@ -262,7 +266,7 @@ class ClStuffContainer
 	cl_context context;
 	cl_command_queue queue;
 
-	ClStuffContainer()
+	ClStuffContainer(BenchmarkLogger &logger) : logger(logger)
 	{
 		clResult = clGetPlatformIDs(1, &platform, &numPlatforms);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
@@ -296,6 +300,8 @@ class ClStuffContainer
 		const char *kernelSourceCstring = kernelSource.c_str();
 		size_t kernelSize = kernelSource.length();
 
+		auto start = std::chrono::steady_clock::now();
+
 		cl_program program = clCreateProgramWithSource(context, 1, &kernelSourceCstring, &kernelSize, &clResult);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
@@ -305,6 +311,12 @@ class ClStuffContainer
 		cl_kernel kernel = clCreateKernel(program, kernelName.c_str(), &clResult);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
+		auto end = std::chrono::steady_clock::now();
+
+		std::chrono::duration<double, std::milli> kernelCompileTime = end - start;
+
+		logger.log("kernel compile time", kernelCompileTime.count());
+
 		return kernel;
 	}
 };
@@ -312,13 +324,15 @@ class ClStuffContainer
 // funkcija, kas sakārto visu kodola izpildei un datu savākšanai
 // outputGrid izmēru saucēja fn var nenoteikt, jo šī pati funkcija sakārtos atmiņu
 void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &grid, std::vector<cl_uchar> &outputGrid,
-					cl_ulong width, cl_ulong height, size_t steps)
+					cl_ulong width, cl_ulong height, size_t steps, BenchmarkLogger &logger)
 {
 	cl_int clResult;
 
 	size_t gridSize = width * height;
 
 	outputGrid.resize(gridSize);
+
+	auto start = std::chrono::steady_clock::now();
 
 	cl_mem gridBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 									   gridSize * sizeof(cl_uchar), grid.data(), &clResult);
@@ -328,7 +342,24 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 											 gridSize * sizeof(cl_uchar), outputGrid.data(), &clResult);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
+	auto end = std::chrono::steady_clock::now();
+
+	std::chrono::duration<double, std::milli> bufferCreationTime = end - start;
+
+	logger.log("buffer creation time", bufferCreationTime.count());
+
 	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
+
+	size_t preferredKernelWorkGroupSize;
+
+	clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+							 sizeof(size_t), &preferredKernelWorkGroupSize, nullptr);
+
+	size_t kernelWorkGroupSize;
+
+	clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t),
+							 &kernelWorkGroupSize, nullptr);
+
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
@@ -338,7 +369,7 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 	cl_mem inputBuffer = gridBuffer;
 	cl_mem outputBuffer = outputGridBuffer;
 
-	size_t localSize = 256;
+	size_t localSize = kernelWorkGroupSize;
 	size_t globalSize = ((gridSize + localSize - 1) / localSize) * localSize;
 
 	double totalTime = 0;
@@ -362,13 +393,17 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
 		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
 
-		totalTime += (double)(end - start);
+		double kernelExecTime = static_cast<double>(end - start);
+
+		logger.log("kernel exec time", kernelExecTime / 1e6); // 1e6, lai dabūtu rezultātu milisekundēs
+
+		totalTime += kernelExecTime;
 
 		std::swap(inputBuffer, outputBuffer);
 	}
-	// totalTime ir nanosekundēs
-	std::cout << "Total exec time: " << (totalTime / 1e6) << "ms\n";
-	std::cout << "Average kernel exec time: " << ((totalTime / steps) / 1e6) << "ms\n";
+
+	logger.log("total exec time", totalTime / 1e6);
+
 	clResult = clEnqueueReadBuffer(clStuffContainer.queue, outputGridBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
 								   outputGrid.data(), 0, nullptr, nullptr);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
@@ -379,19 +414,38 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 int main(int argc, char *argv[])
 {
-	if (argc == 4)
+	if (argc == 5)
 	{
 		const std::string inputFileName = argv[1];
 		const std::string outputFileName = argv[2];
 		const size_t gameSteps = std::stoll(argv[3]);
+		const std::string logFileName = argv[4];
+
+		BenchmarkLogger logger(logFileName, "OpenCL");
+
+		auto start = std::chrono::steady_clock::now();
 
 		size_t width;
 		size_t height;
 		std::vector<cl_uchar> grid = loadGridFromFile(inputFileName, width, height);
 
+		auto end = std::chrono::steady_clock::now();
+
+		std::chrono::duration<double, std::milli> gridLoadTime = end - start;
+
+		logger.log("grid load time", gridLoadTime.count());
+
 		std::vector<cl_uchar> outputGrid;
 
-		ClStuffContainer clStuffContainer;
+		auto clInitStart = std::chrono::steady_clock::now();
+
+		ClStuffContainer clStuffContainer(logger);
+
+		auto clInitEnd = std::chrono::steady_clock::now();
+
+		std::chrono::duration<double, std::milli> clInitTime = clInitEnd - clInitStart;
+
+		logger.log("opencl init time", clInitTime.count());
 
 		size_t maxWorkItems;
 		clGetDeviceInfo(clStuffContainer.device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkItems, nullptr);
@@ -401,14 +455,30 @@ int main(int argc, char *argv[])
 
 		std::cout << "Processing a " << width << "x" << height << " grid with " << gameSteps << " steps\n";
 
-		GameOfLifeStep(clStuffContainer, grid, outputGrid, w, h, gameSteps);
+		auto GoLStart = std::chrono::steady_clock::now();
+
+		GameOfLifeStep(clStuffContainer, grid, outputGrid, w, h, gameSteps, logger);
+
+		auto GoLEnd = std::chrono::steady_clock::now();
+
+		std::chrono::duration<double, std::milli> totalGolTime = GoLEnd - GoLStart;
+
+		logger.log("total game of life time", totalGolTime.count());
+
+		auto writeGridToFileStart = std::chrono::steady_clock::now();
 
 		writeGridToFile(outputGrid, width, height, outputFileName);
+
+		auto writeGridToFileEnd = std::chrono::steady_clock::now();
+
+		std::chrono::duration<double, std::milli> writeGridToFileTime = writeGridToFileEnd - writeGridToFileStart;
+
+		logger.log("write output grid to file time", writeGridToFileTime.count());
 	}
 	else
 	{
 		std::cout << "Correct program usage:\n"
-				  << "\t\t" << argv[0] << " <grid file path> <output grid file path> <game steps>\n";
+				  << "\t\t" << argv[0] << " <grid file path> <output grid file path> <game steps> <log file path>\n";
 	}
 	return 0;
 }
