@@ -1,6 +1,6 @@
 #pragma once
 
-#include "clBenchmark.h"
+#include "benchmarkLogger.h"
 #include <CL/cl.h>
 #include <string>
 

@@ -1,4 +1,4 @@
-#include "clBenchmark.h"
+#include "benchmarkLogger.h"
 #include "clStuff.h"
 #include <CL/cl.h>
 #include <cassert>
