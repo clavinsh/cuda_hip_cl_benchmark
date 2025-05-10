@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -70,6 +71,115 @@ std::string bytesToHexString(std::vector<cl_uint> &bytes)
 	}
 
 	return ss.str();
+}
+
+int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileName, std::vector<cl_uint> &hash,
+				 BenchmarkLogger &logger)
+{
+	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
+	assert(hash.size() * sizeof(cl_uint) == 32);
+
+	cl_int clResult;
+
+	const size_t batchSize = 1 << 20;
+
+	std::ifstream file(pwFileName);
+
+	if (!file.is_open())
+	{
+		throw std::runtime_error("Failed to open file: " + pwFileName);
+	}
+
+	std::vector<std::string> batchBuffer(batchSize);
+
+	std::vector<cl_uchar> batchedKernelPasswords;
+	std::vector<cl_uchar> batchedOffsets;
+
+	std::string line;
+	size_t lineIdx;
+	cl_int crackedIdx = -1;
+
+	std::optional<size_t> kernelWorkGroupSize = {};
+
+	while (!file.eof())
+	{
+		batchedKernelPasswords.clear();
+		batchedOffsets.clear();
+
+		int currentOffset = 0;
+		size_t i = 0;
+		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
+		{
+			batchedOffsets.push_back(currentOffset);
+			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
+			currentOffset += line.size();
+		}
+
+		cl_mem passwordsBuffer =
+			clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+						   batchedKernelPasswords.size() * sizeof(cl_uchar), batchedKernelPasswords.data(), &clResult);
+		assert(clResult == CL_SUCCESS);
+
+		cl_mem offsetsBuffer =
+			clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+						   batchedOffsets.size() * sizeof(cl_uint), batchedOffsets.data(), &clResult);
+		assert(clResult == CL_SUCCESS);
+
+		cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+												 hash.size() * sizeof(cl_uint), hash.data(), &clResult);
+		assert(clResult == CL_SUCCESS);
+
+		cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+												 sizeof(cl_int), &crackedIdx, &clResult);
+		assert(clResult == CL_SUCCESS);
+
+		cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
+
+		// lai nav katru loop reizi jānoskaidro šī vērtība,
+		// visdrīzāk tā jau pēkšņi nemainīsies, jo kodols un GPU konteksts ir tas pats
+		if (!kernelWorkGroupSize.has_value())
+		{
+			size_t temp;
+			clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &temp,
+									 nullptr);
+			kernelWorkGroupSize = temp;
+		}
+
+		cl_uint N = i;
+		cl_uint charCount = batchedKernelPasswords.size();
+
+		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &passwordsBuffer);
+		assert(clResult == CL_SUCCESS);
+		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &offsetsBuffer);
+		assert(clResult == CL_SUCCESS);
+		clResult = clSetKernelArg(kernel, 2, sizeof(cl_uint), &N);
+		assert(clResult == CL_SUCCESS);
+		clResult = clSetKernelArg(kernel, 3, sizeof(cl_uint), &charCount);
+		assert(clResult == CL_SUCCESS);
+		clResult = clSetKernelArg(kernel, 4, sizeof(cl_mem), &targetHashBuffer);
+		assert(clResult == CL_SUCCESS);
+		clResult = clSetKernelArg(kernel, 5, sizeof(cl_mem), &crackedIdxBuffer);
+		assert(clResult == CL_SUCCESS);
+
+		size_t localSize = kernelWorkGroupSize.value();
+		size_t globalSize = ((N + localSize - 1) / localSize) * localSize;
+
+		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0,
+										  nullptr, nullptr);
+		assert(clResult == CL_SUCCESS);
+
+		clResult = clEnqueueReadBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(int), &crackedIdx,
+									   0, nullptr, nullptr);
+		assert(clResult == CL_SUCCESS);
+
+		if (crackedIdx != -1)
+		{
+			crackedIdx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
+			return crackedIdx;
+		}
+	}
+
+	return -1;
 }
 
 int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash,
