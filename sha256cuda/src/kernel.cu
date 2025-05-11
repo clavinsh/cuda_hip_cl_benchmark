@@ -1,9 +1,10 @@
 // SHA 256 implementācija CUDA vidē
 // https://en.wikipedia.org/wiki/SHA-2
 
-#include "sha256_cpu.h"
+#include "benchmarkLogger.h"
 #include <assert.h>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cuda/std/cstdint> // analogs C/C++ <cstdint>, bet nodrošina fiksētus datu tipu lielumus uz device
@@ -18,11 +19,6 @@
 #include <string.h>
 #include <string>
 #include <vector>
-
-// forward deklarācija funkcijām, lai nav intelisense warningi, ka tās nav definētas (ir pieejamas uz device bez header
-// include)
-__device__ unsigned int __funnelshift_r(unsigned int lo, unsigned int hi, unsigned int shift);
-unsigned int atomicCAS(unsigned int *address, unsigned int compare, unsigned int val);
 
 // macro priekš katra cuda API izsaukuma rezultāta pārbaudes
 // ņemts no
@@ -196,8 +192,36 @@ __device__ bool compareHashes(const cuda::std::uint8_t *h1, const cuda::std::uin
 	return true;
 }
 
-__global__ void kernel(const cuda::std::uint8_t *passwords, const int *pwLengths, int pwCount,
-					   cuda::std::uint64_t maxPwLength, const cuda::std::uint8_t *targetHash, int *resultIndex)
+__device__ size_t current_pw_size(const uint *offsets, uint password_count, uint char_count, int idx)
+{
+	// paroļu buferis nesatur \0 simbolus, tāpēc jānosaka paroles garums pēc offsetiem
+	if (idx < password_count - 1)
+	{
+		return offsets[idx + 1] - offsets[idx];
+	}
+	// pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
+	else
+	{
+		return char_count - offsets[idx];
+	}
+}
+
+__host__ size_t h_current_pw_size(std::vector<uint> &offsets, uint password_count, uint char_count, uint idx)
+{
+	// paroļu buferis nesatur \0 simbolus, tāpēc jānosaka paroles garums pēc offsetiem
+	if (idx < password_count - 1)
+	{
+		return offsets[idx + 1] - offsets[idx];
+	}
+	// pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
+	else
+	{
+		return char_count - offsets[idx];
+	}
+}
+
+__global__ void kernel(const cuda::std::uint8_t *passwords, const uint *offsets, uint pwCount, uint charCount,
+					   const cuda::std::uint8_t *targetHash, int *resultIndex)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -206,8 +230,9 @@ __global__ void kernel(const cuda::std::uint8_t *passwords, const int *pwLengths
 		return;
 	}
 
-	const cuda::std::uint8_t *password = passwords + (idx * maxPwLength);
-	int pwLength = pwLengths[idx];
+	const cuda::std::uint8_t *password = passwords + offsets[idx];
+
+	size_t pwLength = current_pw_size(offsets, pwCount, charCount, idx);
 
 	cuda::std::uint8_t hash[32];
 
@@ -261,67 +286,57 @@ std::string parseBytesToHexString(const uint8_t *data, size_t length)
 }
 
 void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cracked_idx, bool useGpu,
-			   std::string &foundPw)
+			   std::string &foundPw, BenchmarkLogger &logger)
 {
 	assert(*cracked_idx == -1); // te sākumā jau jābūt vērtībai -1, padota no main
 
 	const int batchSize =
 		1 << 20; // 1D režģiem cuda limitācija ir 2^31, bet šeit limitējošais faktors būs atmiņa parolēm
 
-	const int maxPwLength = 55; // maksimālais ziņojuma garums, lai tas ietilptu vienā sha blokā
-	const size_t maxBatchBufferSize = batchSize * maxPwLength;
-
-	std::vector<uint8_t> pwBuffer(maxBatchBufferSize, 0);
-	std::vector<int> pwLengths(batchSize);
-
-	std::vector<std::string> batchBuffer;
-
-	std::ifstream file(fileName);
+	std::ifstream file(fileName, std::ios::binary);
 	if (!file.is_open())
 	{
 		throw std::runtime_error("Could not open file " + fileName);
 	}
 
+	std::vector<uint8_t> batchedKernelPasswords(batchSize * 16); // +/- vajadzētu pietikt parasta garuma parolēm
+	std::vector<uint> batchedOffsets(batchSize);
+
 	std::string line;
-	size_t lineIdx;
+	size_t lineIdx = 0;
 
-	while (!file.eof())
+	while (file)
 	{
-		// ielādē attiecīgo batch buferī
-		batchBuffer.clear();
-		for (size_t i = 0; i < batchSize && std::getline(file, line); i++, lineIdx++)
+		auto pwBatchStart = std::chrono::steady_clock::now();
+
+		batchedKernelPasswords.clear();
+
+		int currentOffset = 0;
+		size_t i = 0;
+
+		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
 		{
-			batchBuffer.push_back(line);
+			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
+			currentOffset += line.size();
+			batchedOffsets[i] = currentOffset;
 		}
 
-		// batcham atbilstošo paroļu ievietošana buferī
-		size_t currentBatchSize = batchBuffer.size();
-		for (size_t i = 0; i < currentBatchSize; i++)
-		{
-			const std::string &pw = batchBuffer[i];
-			int pwLength = pw.size();
+		auto pwBatchEnd = std::chrono::steady_clock::now();
 
-			assert(pwLength <= maxPwLength);
-
-			pwLengths[i] = pwLength;
-
-			for (size_t j = 0; j < pwLength; j++)
-			{
-				// ja parole ir īsāka par maxPwLength, tad 'tukšie' masīva elementi būs aizpildīti ar nullēm
-				pwBuffer[i * maxPwLength + j] = (uint8_t)pw[j];
-			}
-		}
+		logger.chronoLog("pw batch loaded from file and processed", pwBatchStart, pwBatchEnd);
 
 		if (useGpu)
 		{
 			cuda::std::uint8_t *d_passwords;
 			cuda::std::uint8_t *d_hash;
-			int *d_pwLengths;
+			uint *d_offsets;
 			int *d_cracked_idx;
 
 			*cracked_idx = -1;
 
 			CUDA_CHECK(cudaSetDevice(0));
+
+			auto bufferCreationStart = std::chrono::steady_clock::now();
 
 			CUDA_CHECK(cudaMalloc(&d_hash, 32));
 			CUDA_CHECK(cudaMemcpy(d_hash, hash.data(), 32, cudaMemcpyHostToDevice));
@@ -329,56 +344,59 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 			CUDA_CHECK(cudaMalloc(&d_cracked_idx, sizeof(int)));
 			CUDA_CHECK(cudaMemcpy(d_cracked_idx, cracked_idx, sizeof(int), cudaMemcpyHostToDevice));
 
-			CUDA_CHECK(cudaMalloc(&d_passwords, currentBatchSize * maxPwLength * sizeof(cuda::std::uint8_t)));
-			CUDA_CHECK(cudaMemcpy(d_passwords, pwBuffer.data(),
-								  currentBatchSize * maxPwLength * sizeof(cuda::std::uint8_t), cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMalloc(&d_passwords, batchedKernelPasswords.size() * sizeof(cuda::std::uint8_t)));
+			CUDA_CHECK(cudaMemcpy(d_passwords, batchedKernelPasswords.data(),
+								  batchedKernelPasswords.size() * sizeof(cuda::std::uint8_t), cudaMemcpyHostToDevice));
 
-			CUDA_CHECK(cudaMalloc(&d_pwLengths, currentBatchSize * sizeof(int)));
-			CUDA_CHECK(
-				cudaMemcpy(d_pwLengths, pwLengths.data(), currentBatchSize * sizeof(int), cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMalloc(&d_offsets, i * sizeof(uint)));
+			CUDA_CHECK(cudaMemcpy(d_offsets, batchedOffsets.data(), i * sizeof(uint), cudaMemcpyHostToDevice));
+
+			auto bufferCreationEnd = std::chrono::steady_clock::now();
+
+			logger.chronoLog("kernel buffer creation time", bufferCreationStart, bufferCreationEnd);
 
 			int numThreads = 256;
-			int numBlocks = (currentBatchSize + numThreads - 1) / numThreads;
+			int numBlocks = (i + numThreads - 1) / numThreads;
 
-			kernel<<<numBlocks, numThreads>>>(d_passwords, d_pwLengths, currentBatchSize, maxPwLength, d_hash,
+			cudaEvent_t start;
+			cudaEvent_t stop;
+
+			CUDA_CHECK(cudaEventCreate(&start));
+			CUDA_CHECK(cudaEventCreate(&stop));
+
+			CUDA_CHECK(cudaEventRecord(start));
+
+			kernel<<<numBlocks, numThreads>>>(d_passwords, d_offsets, i, batchedKernelPasswords.size(), d_hash,
 											  d_cracked_idx);
+
+			CUDA_CHECK(cudaEventRecord(stop));
 
 			CUDA_CHECK(cudaGetLastError());
 			CUDA_CHECK(cudaDeviceSynchronize());
 
+			float kernelExecMs = 0;
+
+			CUDA_CHECK(cudaEventElapsedTime(&kernelExecMs, start, stop));
+
+			logger.log("kernel exec time", kernelExecMs);
+
 			CUDA_CHECK(cudaMemcpy(cracked_idx, d_cracked_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
 			cudaFree(d_passwords);
-			cudaFree(d_pwLengths);
+			cudaFree(d_offsets);
 			cudaFree(d_hash);
 			cudaFree(d_cracked_idx);
 
 			if (*cracked_idx != -1)
 			{
-				foundPw = batchBuffer[*cracked_idx];
-				*cracked_idx +=
-					(lineIdx - currentBatchSize); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
+
+				uint pwStart = batchedOffsets[*cracked_idx];
+				size_t pwSize = h_current_pw_size(batchedOffsets, i, batchedKernelPasswords.size(), *cracked_idx);
+
+				foundPw = std::string(reinterpret_cast<const char *>(&batchedKernelPasswords[pwStart]), pwSize);
+
+				*cracked_idx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
 				return;
-			}
-		}
-		// CPU izpilde
-		else
-		{
-			for (size_t i = 0; i < currentBatchSize; i++)
-			{
-				const uint8_t *pwStart = &pwBuffer[i * maxPwLength];
-				size_t pwLength = pwLengths[i];
-
-				std::vector<uint8_t> computedHash(32);
-
-				cpu_sha256(pwStart, pwLength, computedHash.data());
-
-				if (computedHash == hash)
-				{
-					foundPw = batchBuffer[i];
-					*cracked_idx = lineIdx - currentBatchSize + i;
-					return;
-				}
 			}
 		}
 	}
@@ -482,14 +500,15 @@ int main(int argc, char *argv[])
 
 			std::cout << "Tests complete\n";
 		}
-		// padoti 4 argumenti, CPU vai GPU izpilde un paroles fails, hash
 		else if (argc == 4)
 		{
-			const std::string cpuOrGpu = argv[1];
-			const std::string inputFileName = argv[2];
-			const std::string hexHash = argv[3];
+			const std::string inputFileName = argv[1];
+			const std::string hexHash = argv[2];
+			const std::string logFileName = argv[3];
 
 			std::vector<uint8_t> hash = hexStringToBytes(hexHash);
+
+			BenchmarkLogger logger(logFileName, "CUDA");
 
 			std::string foundPw;
 
@@ -497,20 +516,13 @@ int main(int argc, char *argv[])
 
 			int cracked_idx = -1;
 
-			if (cpuOrGpu == "--cpu")
-			{
-				std::cout << "CPU mode\n";
-				hashCheck(inputFileName, hash, &cracked_idx, false, foundPw);
-			}
-			else if (cpuOrGpu == "--gpu")
-			{
-				std::cout << "GPU mode\n";
-				hashCheck(inputFileName, hash, &cracked_idx, true, foundPw);
-			}
-			else
-			{
-				throw std::runtime_error("Invalid mode! Use --cpu or --gpu");
-			}
+			auto hashCheckStart = std::chrono::steady_clock::now();
+
+			hashCheck(inputFileName, hash, &cracked_idx, true, foundPw, logger);
+
+			auto hashCheckEnd = std::chrono::steady_clock::now();
+
+			logger.chronoLog("hash check time", hashCheckStart, hashCheckEnd);
 
 			if (cracked_idx != -1)
 			{
@@ -526,10 +538,8 @@ int main(int argc, char *argv[])
 			std::cout << "Correct program usage:\n"
 					  << "\tRunning tests:\n"
 					  << "\t\t" << argv[0] << " --test\n"
-					  << "\tCPU Password cracking:\n"
-					  << "\t\t" << argv[0] << " --cpu <passwords file> <password hash>\n"
 					  << "\tGPU Password cracking:\n"
-					  << "\t\t" << argv[0] << " --gpu <passwords file> <password hash>\n";
+					  << "\t\t" << argv[0] << " <passwords file> <password hash> <log file>\n";
 
 			return -1;
 		}
