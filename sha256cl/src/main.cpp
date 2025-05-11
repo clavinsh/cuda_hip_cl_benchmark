@@ -73,8 +73,22 @@ std::string bytesToHexString(std::vector<cl_uint> &bytes)
 	return ss.str();
 }
 
+size_t current_pw_size(std::vector<cl_uint> &offsets, cl_uint password_count, cl_uint char_count, cl_uint idx)
+{
+	// paroļu buferis nesatur \0 simbolus, tāpēc jānosaka paroles garums pēc offsetiem
+	if (idx < password_count - 1)
+	{
+		return offsets[idx + 1] - offsets[idx];
+	}
+	// pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
+	else
+	{
+		return char_count - offsets[idx];
+	}
+}
+
 int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileName, std::vector<cl_uint> &hash,
-				 BenchmarkLogger &logger)
+				 std::string &foundPw, BenchmarkLogger &logger)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
 	assert(hash.size() * sizeof(cl_uint) == 32);
@@ -83,37 +97,45 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 	const size_t batchSize = 1 << 20;
 
-	std::ifstream file(pwFileName);
+	std::ifstream file(pwFileName, std::ios::binary);
 
 	if (!file.is_open())
 	{
 		throw std::runtime_error("Failed to open file: " + pwFileName);
 	}
 
-	std::vector<std::string> batchBuffer(batchSize);
-
-	std::vector<cl_uchar> batchedKernelPasswords;
-	std::vector<cl_uchar> batchedOffsets;
+	std::vector<cl_uchar> batchedKernelPasswords(batchSize * 16); // +/- vajadzētu pietikt parasta garuma parolēm
+	std::vector<cl_uint> batchedOffsets(batchSize + 1);
 
 	std::string line;
-	size_t lineIdx;
+	size_t lineIdx = 0;
 	cl_int crackedIdx = -1;
 
 	std::optional<size_t> kernelWorkGroupSize = {};
 
-	while (!file.eof())
+	while (file)
 	{
+		auto pwBatchStart = std::chrono::steady_clock::now();
+
 		batchedKernelPasswords.clear();
 		batchedOffsets.clear();
 
 		int currentOffset = 0;
+		batchedOffsets.push_back(currentOffset);
 		size_t i = 0;
+
 		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
 		{
-			batchedOffsets.push_back(currentOffset);
 			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
 			currentOffset += line.size();
+			batchedOffsets.push_back(currentOffset);
 		}
+
+		auto pwBatchEnd = std::chrono::steady_clock::now();
+
+		logger.chronoLog("pw batch loaded from file and processed", pwBatchStart, pwBatchEnd);
+
+		auto bufferCreationStart = std::chrono::steady_clock::now();
 
 		cl_mem passwordsBuffer =
 			clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -132,6 +154,10 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 		cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
 												 sizeof(cl_int), &crackedIdx, &clResult);
 		assert(clResult == CL_SUCCESS);
+
+		auto bufferCreationEnd = std::chrono::steady_clock::now();
+
+		logger.chronoLog("kernel buffer creation time", bufferCreationStart, bufferCreationEnd);
 
 		cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
 
@@ -161,12 +187,24 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 		clResult = clSetKernelArg(kernel, 5, sizeof(cl_mem), &crackedIdxBuffer);
 		assert(clResult == CL_SUCCESS);
 
+		cl_event profilingEvent;
+
 		size_t localSize = kernelWorkGroupSize.value();
 		size_t globalSize = ((N + localSize - 1) / localSize) * localSize;
 
 		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0,
-										  nullptr, nullptr);
+										  nullptr, &profilingEvent);
 		assert(clResult == CL_SUCCESS);
+
+		cl_ulong start;
+		cl_ulong end;
+
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
+
+		double kernelExecTime = static_cast<double>(end - start);
+
+		logger.log("kernel exec time", kernelExecTime / 1e6); // 1e6, lai dabūtu rezultātu milisekundēs
 
 		clResult = clEnqueueReadBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(int), &crackedIdx,
 									   0, nullptr, nullptr);
@@ -174,6 +212,11 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 		if (crackedIdx != -1)
 		{
+			// nez vai smukākais risinājums, bet strādā
+			cl_uint pwStart = batchedOffsets[crackedIdx];
+			size_t pwSize = current_pw_size(batchedOffsets, i, charCount, crackedIdx);
+			foundPw = std::string(reinterpret_cast<const char *>(&batchedKernelPasswords[pwStart]), pwSize);
+
 			crackedIdx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
 			return crackedIdx;
 		}
@@ -283,20 +326,15 @@ int main(int argc, char *argv[])
 
 		BenchmarkLogger logger(logFileName, "OpenCL");
 
-		auto pwFileStart = std::chrono::steady_clock::now();
-
-		std::vector<std::string> passwords = passwordsfromFile(inputFileName);
-		std::vector<cl_uint> hash = hexStringToBytes(hexHash);
-
-		auto pwFileEnd = std::chrono::steady_clock::now();
-
-		logger.chronoLog("password file & hash processed", pwFileStart, pwFileEnd);
-
 		ClStuffContainer clStuffContainer(logger);
+
+		std::vector<cl_uint> hash = hexStringToBytes(hexHash);
 
 		auto hashCheckStart = std::chrono::steady_clock::now();
 
-		int crackedIdx = hashCheck(clStuffContainer, passwords, hash, logger);
+		std::string foundPw;
+
+		int crackedIdx = hashCheck_v2(clStuffContainer, inputFileName, hash, foundPw, logger);
 
 		auto hashCheckEnd = std::chrono::steady_clock::now();
 
@@ -307,14 +345,8 @@ int main(int argc, char *argv[])
 			std::cout << "Password not found!\n";
 			return 0;
 		}
-		else if ((size_t)crackedIdx >= passwords.size())
-		{
-			std::cout << "Password out of bounds!\n"
-					  << "Given found index " << crackedIdx << " >= " << passwords.size() << "\n";
-			return -1;
-		}
 
-		std::cout << "Password found at index " << crackedIdx << ": " << passwords[crackedIdx] << "\n";
+		std::cout << "Password found index " << crackedIdx << ": " << foundPw << "\n";
 		return 0;
 	}
 	else
