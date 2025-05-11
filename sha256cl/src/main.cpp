@@ -95,7 +95,7 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 	cl_int clResult;
 
-	const size_t batchSize = 1 << 20;
+	const size_t batchSize = 1 << 18;
 
 	std::ifstream file(pwFileName, std::ios::binary);
 
@@ -118,17 +118,17 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 		auto pwBatchStart = std::chrono::steady_clock::now();
 
 		batchedKernelPasswords.clear();
-		batchedOffsets.clear();
 
 		int currentOffset = 0;
-		batchedOffsets.push_back(currentOffset);
 		size_t i = 0;
+
+		batchedOffsets[i] = currentOffset;
 
 		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
 		{
 			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
 			currentOffset += line.size();
-			batchedOffsets.push_back(currentOffset);
+			batchedOffsets[i] = currentOffset;
 		}
 
 		auto pwBatchEnd = std::chrono::steady_clock::now();
