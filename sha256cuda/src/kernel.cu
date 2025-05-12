@@ -245,7 +245,7 @@ __global__ void kernel(const cuda::std::uint8_t *passwords, const uint *offsets,
 		// ja resultIndex glabājas vērtība -1, tad aizstāj to ar idx
 		// ar šo tiek arī reizē nodrošināts, ka ja kāds pavediens vēlāk tomēr nonāk līdz šim stāvoklim,
 		// tad modifikācija netiks veikta, jo tajā brīdī jau 'resultIndex' != -1
-		atomicCAS((unsigned int *)resultIndex, -1, (unsigned int)idx);
+		atomicCAS(resultIndex, -1, idx);
 	}
 }
 
@@ -290,6 +290,11 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 {
 	assert(*cracked_idx == -1); // te sākumā jau jābūt vērtībai -1, padota no main
 
+	if (!useGpu)
+	{
+		return;
+	}
+
 	const int batchSize =
 		1 << 20; // 1D režģiem cuda limitācija ir 2^31, bet šeit limitējošais faktors būs atmiņa parolēm
 
@@ -299,126 +304,143 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 		throw std::runtime_error("Could not open file " + fileName);
 	}
 
-	std::vector<uint8_t> batchedKernelPasswords(batchSize * 16); // +/- vajadzētu pietikt parasta garuma parolēm
-	std::vector<uint> batchedOffsets(batchSize);
-
 	std::string line;
 	size_t lineIdx = 0;
+
+	CUDA_CHECK(cudaSetDevice(0));
+
+	auto hostPinnedMemStart = std::chrono::steady_clock::now();
+
+	// pinnota host side atmiņa, jo paroles un offseti eksistē gan uz CPU, gan GPU
+	// data transfer optimizācija
+	uint8_t *h_passwordsPinned = nullptr;
+	uint *h_offsetsPinned = nullptr;
+
+	CUDA_CHECK(cudaMallocHost(&h_passwordsPinned, batchSize * 16 * sizeof(uint8_t)));
+	CUDA_CHECK(cudaMallocHost(&h_offsetsPinned, batchSize * sizeof(uint)));
+
+	auto hostPinnedMemEnd = std::chrono::steady_clock::now();
+
+	logger.chronoLog("host side pinned mem buffer creation time", hostPinnedMemStart, hostPinnedMemEnd);
+
+	auto deviceFixedBuffersAndDataStart = std::chrono::steady_clock::now();
+
+	cuda::std::uint8_t *d_hash;
+	int *d_crackedIdx;
+	cuda::std::uint8_t *d_passwords;
+	uint *d_offsets;
+
+	CUDA_CHECK(cudaMalloc(&d_hash, 32));
+	CUDA_CHECK(cudaMemcpy(d_hash, hash.data(), 32, cudaMemcpyHostToDevice));
+	CUDA_CHECK(cudaMalloc(&d_crackedIdx, sizeof(int)));
+
+	cudaEvent_t start, stop;
+	CUDA_CHECK(cudaEventCreate(&start));
+	CUDA_CHECK(cudaEventCreate(&stop));
+
+	CUDA_CHECK(cudaMalloc(&d_passwords, batchSize * 16 * sizeof(cuda::std::uint8_t)));
+	CUDA_CHECK(cudaMalloc(&d_offsets, batchSize * sizeof(uint)));
+
+	auto deviceFixedBuffersAndDataEnd = std::chrono::steady_clock::now();
+
+	logger.chronoLog("device side fixed buffers and data time", deviceFixedBuffersAndDataStart,
+					 deviceFixedBuffersAndDataEnd);
 
 	while (file)
 	{
 		auto pwBatchStart = std::chrono::steady_clock::now();
 
-		batchedKernelPasswords.clear();
-
 		int currentOffset = 0;
 		size_t i = 0;
+		size_t pwBytes = 0;
 
 		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
 		{
-			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
+			memcpy(h_passwordsPinned + pwBytes, line.data(), line.size());
+			h_offsetsPinned[i] = currentOffset;
+
+			pwBytes += line.size();
 			currentOffset += line.size();
-			batchedOffsets[i] = currentOffset;
+		}
+
+		if (i == 0)
+		{
+			break; // visdrīzāk nav jēgas turpināt, jo failā vairs nekā nav
 		}
 
 		auto pwBatchEnd = std::chrono::steady_clock::now();
 
 		logger.chronoLog("pw batch loaded from file and processed", pwBatchStart, pwBatchEnd);
 
-		if (useGpu)
+		auto bufferCreationStart = std::chrono::steady_clock::now();
+
+		*cracked_idx = -1;
+		CUDA_CHECK(cudaMemcpy(d_crackedIdx, cracked_idx, sizeof(int), cudaMemcpyHostToDevice));
+
+		CUDA_CHECK(
+			cudaMemcpy(d_passwords, h_passwordsPinned, pwBytes * sizeof(cuda::std::uint8_t), cudaMemcpyHostToDevice));
+		CUDA_CHECK(cudaMemcpy(d_offsets, h_offsetsPinned, i * sizeof(uint), cudaMemcpyHostToDevice));
+
+		auto bufferCreationEnd = std::chrono::steady_clock::now();
+
+		logger.chronoLog("kernel buffer creation time", bufferCreationStart, bufferCreationEnd);
+
+		int numThreads = 256;
+		int numBlocks = (i + numThreads - 1) / numThreads;
+
+		CUDA_CHECK(cudaEventRecord(start));
+
+		kernel<<<numBlocks, numThreads>>>(d_passwords, d_offsets, static_cast<uint>(i), static_cast<uint>(pwBytes),
+										  d_hash, d_crackedIdx);
+
+		CUDA_CHECK(cudaEventRecord(stop));
+		CUDA_CHECK(cudaGetLastError());
+		CUDA_CHECK(cudaDeviceSynchronize());
+
+		float kernelExecMs = 0;
+		CUDA_CHECK(cudaEventElapsedTime(&kernelExecMs, start, stop));
+		logger.log("kernel exec time", kernelExecMs);
+
+		CUDA_CHECK(cudaMemcpy(cracked_idx, d_crackedIdx, sizeof(int), cudaMemcpyDeviceToHost));
+
+		if (*cracked_idx != -1)
 		{
-			cuda::std::uint8_t *d_passwords;
-			cuda::std::uint8_t *d_hash;
-			uint *d_offsets;
-			int *d_cracked_idx;
-
-			*cracked_idx = -1;
-
-			CUDA_CHECK(cudaSetDevice(0));
-
-			auto bufferCreationStart = std::chrono::steady_clock::now();
-
-			CUDA_CHECK(cudaMalloc(&d_hash, 32));
-			CUDA_CHECK(cudaMemcpy(d_hash, hash.data(), 32, cudaMemcpyHostToDevice));
-
-			CUDA_CHECK(cudaMalloc(&d_cracked_idx, sizeof(int)));
-			CUDA_CHECK(cudaMemcpy(d_cracked_idx, cracked_idx, sizeof(int), cudaMemcpyHostToDevice));
-
-			CUDA_CHECK(cudaMalloc(&d_passwords, batchedKernelPasswords.size() * sizeof(cuda::std::uint8_t)));
-			CUDA_CHECK(cudaMemcpy(d_passwords, batchedKernelPasswords.data(),
-								  batchedKernelPasswords.size() * sizeof(cuda::std::uint8_t), cudaMemcpyHostToDevice));
-
-			CUDA_CHECK(cudaMalloc(&d_offsets, i * sizeof(uint)));
-			CUDA_CHECK(cudaMemcpy(d_offsets, batchedOffsets.data(), i * sizeof(uint), cudaMemcpyHostToDevice));
-
-			auto bufferCreationEnd = std::chrono::steady_clock::now();
-
-			logger.chronoLog("kernel buffer creation time", bufferCreationStart, bufferCreationEnd);
-
-			int numThreads = 256;
-			int numBlocks = (i + numThreads - 1) / numThreads;
-
-			cudaEvent_t start;
-			cudaEvent_t stop;
-
-			CUDA_CHECK(cudaEventCreate(&start));
-			CUDA_CHECK(cudaEventCreate(&stop));
-
-			CUDA_CHECK(cudaEventRecord(start));
-
-			kernel<<<numBlocks, numThreads>>>(d_passwords, d_offsets, i, batchedKernelPasswords.size(), d_hash,
-											  d_cracked_idx);
-
-			CUDA_CHECK(cudaEventRecord(stop));
-
-			CUDA_CHECK(cudaGetLastError());
-			CUDA_CHECK(cudaDeviceSynchronize());
-
-			float kernelExecMs = 0;
-
-			CUDA_CHECK(cudaEventElapsedTime(&kernelExecMs, start, stop));
-
-			logger.log("kernel exec time", kernelExecMs);
-
-			CUDA_CHECK(cudaMemcpy(cracked_idx, d_cracked_idx, sizeof(int), cudaMemcpyDeviceToHost));
-
-			cudaFree(d_passwords);
-			cudaFree(d_offsets);
-			cudaFree(d_hash);
-			cudaFree(d_cracked_idx);
-
-			if (*cracked_idx != -1)
+			if (static_cast<uint>(*cracked_idx) >= i)
 			{
-
-				uint pwStart = batchedOffsets[*cracked_idx];
-				size_t pwSize = h_current_pw_size(batchedOffsets, i, batchedKernelPasswords.size(), *cracked_idx);
-
-				foundPw = std::string(reinterpret_cast<const char *>(&batchedKernelPasswords[pwStart]), pwSize);
-
-				*cracked_idx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
-				return;
+				*cracked_idx = -1;
+				continue;
 			}
+
+			uint pwStart = h_offsetsPinned[*cracked_idx];
+			size_t pwSize;
+
+			if (static_cast<uint>(*cracked_idx) < i - 1)
+			{
+				pwSize = h_offsetsPinned[*cracked_idx + 1] - pwStart;
+			}
+
+			// pēdējai parolei nav nākamais offsets, tāpēc jāizmanto kopējais simbolu skaits
+			else
+			{
+				pwSize = pwBytes - pwStart;
+			}
+
+			foundPw = std::string(reinterpret_cast<const char *>(&h_passwordsPinned[pwStart]), pwSize);
+
+			*cracked_idx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
+
+			break;
 		}
 	}
-	file.close();
-}
 
-void processFile(const std::string &fileName, std::vector<std::string> &buffer)
-{
-	std::ifstream file(fileName);
-
-	if (!file.is_open())
-	{
-		throw std::runtime_error("Could not open file " + fileName);
-	}
-
-	std::string line;
-	unsigned int currentOffset = 0;
-
-	while (std::getline(file, line))
-	{
-		buffer.push_back(line);
-	}
+	cudaFree(d_passwords);
+	cudaFree(d_offsets);
+	cudaFree(d_hash);
+	cudaFree(d_crackedIdx);
+	cudaEventDestroy(start);
+	cudaEventDestroy(stop);
+	cudaFreeHost(h_passwordsPinned);
+	cudaFreeHost(h_offsetsPinned);
 
 	file.close();
 }
@@ -526,11 +548,11 @@ int main(int argc, char *argv[])
 
 			if (cracked_idx != -1)
 			{
-				std::cout << "Password found!\n" << foundPw << std::endl;
+				std::cout << "Password found at index " << cracked_idx << ": " << foundPw << "\n";
 			}
 			else
 			{
-				std::cout << "No matching password found." << std::endl;
+				std::cout << "No matching password found." << "\n";
 			}
 		}
 		else
