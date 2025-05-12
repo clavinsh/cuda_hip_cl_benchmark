@@ -7,7 +7,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <optional>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -87,15 +86,15 @@ size_t current_pw_size(std::vector<cl_uint> &offsets, cl_uint password_count, cl
 	}
 }
 
-int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileName, std::vector<cl_uint> &hash,
-				 std::string &foundPw, BenchmarkLogger &logger)
+int hashCheck_v2_with_pinned_memory(ClStuffContainer &clStuffContainer, const std::string &pwFileName,
+									std::vector<cl_uint> &hash, std::string &foundPw, BenchmarkLogger &logger)
 {
 	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
 	assert(hash.size() * sizeof(cl_uint) == 32);
 
 	cl_int clResult;
 
-	const size_t batchSize = 1 << 18;
+	const size_t batchSize = 1 << 20;
 
 	std::ifstream file(pwFileName, std::ios::binary);
 
@@ -104,31 +103,84 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 		throw std::runtime_error("Failed to open file: " + pwFileName);
 	}
 
-	std::vector<cl_uchar> batchedKernelPasswords(batchSize * 16); // +/- vajadzētu pietikt parasta garuma parolēm
-	std::vector<cl_uint> batchedOffsets(batchSize + 1);
+	auto hostPinnedMemStart = std::chrono::steady_clock::now();
+
+	// Allocate pinned memory for host buffers
+	cl_mem pinnedPasswordsHost = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+												batchSize * 16 * sizeof(cl_uchar), nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	cl_mem pinnedOffsetsHost = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+											  batchSize * sizeof(cl_uint), nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	// Map the pinned memory to get a pointer that the host can use
+	cl_uchar *batchedKernelPasswords =
+		(cl_uchar *)clEnqueueMapBuffer(clStuffContainer.queue, pinnedPasswordsHost, CL_TRUE, CL_MAP_WRITE, 0,
+									   batchSize * 16 * sizeof(cl_uchar), 0, nullptr, nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	cl_uint *batchedOffsets =
+		(cl_uint *)clEnqueueMapBuffer(clStuffContainer.queue, pinnedOffsetsHost, CL_TRUE, CL_MAP_WRITE, 0,
+									  batchSize * sizeof(cl_uint), 0, nullptr, nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	auto hostPinnedMemEnd = std::chrono::steady_clock::now();
+
+	logger.chronoLog("host side pinned mem buffer creation time", hostPinnedMemStart, hostPinnedMemEnd);
 
 	std::string line;
 	size_t lineIdx = 0;
 	cl_int crackedIdx = -1;
 
-	std::optional<size_t> kernelWorkGroupSize = {};
+	// Create and compile kernel only once
+	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
+
+	// Get kernel work group size once
+	size_t kernelWorkGroupSize;
+	clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t),
+							 &kernelWorkGroupSize, nullptr);
+
+	auto deviceFixedBuffersAndDataStart = std::chrono::steady_clock::now();
+
+	// Create buffer for the hash once (it doesn't change)
+	cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+											 hash.size() * sizeof(cl_uint), hash.data(), &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	// Create device buffers once
+	cl_mem passwordsBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY,
+											batchSize * 16 * sizeof(cl_uchar), nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	cl_mem offsetsBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY, batchSize * sizeof(cl_uint), nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	cl_mem crackedIdxBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, sizeof(cl_int), nullptr, &clResult);
+	assert(clResult == CL_SUCCESS);
+
+	auto deviceFixedBuffersAndDataEnd = std::chrono::steady_clock::now();
+
+	logger.chronoLog("device side fixed buffers and data time", deviceFixedBuffersAndDataStart,
+					 deviceFixedBuffersAndDataEnd);
 
 	while (file)
 	{
 		auto pwBatchStart = std::chrono::steady_clock::now();
 
-		batchedKernelPasswords.clear();
-
-		int currentOffset = 0;
+		size_t passwordsSize = 0;
+		uint currentOffset = 0;
 		size_t i = 0;
-
-		batchedOffsets[i] = currentOffset;
 
 		for (; i < batchSize && std::getline(file, line); i++, lineIdx++)
 		{
-			batchedKernelPasswords.insert(batchedKernelPasswords.end(), line.begin(), line.end());
-			currentOffset += line.size();
+			std::memcpy(batchedKernelPasswords + passwordsSize, line.data(), line.size());
 			batchedOffsets[i] = currentOffset;
+
+			passwordsSize += line.size();
+			currentOffset += line.size();
 		}
 
 		auto pwBatchEnd = std::chrono::steady_clock::now();
@@ -137,42 +189,38 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 		auto bufferCreationStart = std::chrono::steady_clock::now();
 
-		cl_mem passwordsBuffer =
-			clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-						   batchedKernelPasswords.size() * sizeof(cl_uchar), batchedKernelPasswords.data(), &clResult);
+		// Unmap host buffers to ensure data is ready for transfer
+		clEnqueueUnmapMemObject(clStuffContainer.queue, pinnedPasswordsHost, batchedKernelPasswords, 0, nullptr,
+								nullptr);
+		clEnqueueUnmapMemObject(clStuffContainer.queue, pinnedOffsetsHost, batchedOffsets, 0, nullptr, nullptr);
+
+		// Transfer data from pinned memory to device buffers
+		clEnqueueCopyBuffer(clStuffContainer.queue, pinnedPasswordsHost, passwordsBuffer, 0, 0,
+							passwordsSize * sizeof(cl_uchar), 0, nullptr, nullptr);
+		clEnqueueCopyBuffer(clStuffContainer.queue, pinnedOffsetsHost, offsetsBuffer, 0, 0, i * sizeof(cl_uint), 0,
+							nullptr, nullptr);
+
+		// Reset crackedIdx
+		crackedIdx = -1;
+		clEnqueueWriteBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(cl_int), &crackedIdx, 0,
+							 nullptr, nullptr);
+
+		// Remap the pinned memory for the next iteration
+		batchedKernelPasswords =
+			(cl_uchar *)clEnqueueMapBuffer(clStuffContainer.queue, pinnedPasswordsHost, CL_TRUE, CL_MAP_WRITE, 0,
+										   batchSize * 16 * sizeof(cl_uchar), 0, nullptr, nullptr, &clResult);
 		assert(clResult == CL_SUCCESS);
 
-		cl_mem offsetsBuffer =
-			clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-						   batchedOffsets.size() * sizeof(cl_uint), batchedOffsets.data(), &clResult);
-		assert(clResult == CL_SUCCESS);
-
-		cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-												 hash.size() * sizeof(cl_uint), hash.data(), &clResult);
-		assert(clResult == CL_SUCCESS);
-
-		cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-												 sizeof(cl_int), &crackedIdx, &clResult);
+		batchedOffsets = (cl_uint *)clEnqueueMapBuffer(clStuffContainer.queue, pinnedOffsetsHost, CL_TRUE, CL_MAP_WRITE,
+													   0, batchSize * sizeof(cl_uint), 0, nullptr, nullptr, &clResult);
 		assert(clResult == CL_SUCCESS);
 
 		auto bufferCreationEnd = std::chrono::steady_clock::now();
 
 		logger.chronoLog("kernel buffer creation time", bufferCreationStart, bufferCreationEnd);
 
-		cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
-
-		// lai nav katru loop reizi jānoskaidro šī vērtība,
-		// visdrīzāk tā jau pēkšņi nemainīsies, jo kodols un GPU konteksts ir tas pats
-		if (!kernelWorkGroupSize.has_value())
-		{
-			size_t temp;
-			clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &temp,
-									 nullptr);
-			kernelWorkGroupSize = temp;
-		}
-
 		cl_uint N = i;
-		cl_uint charCount = batchedKernelPasswords.size();
+		cl_uint charCount = passwordsSize;
 
 		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &passwordsBuffer);
 		assert(clResult == CL_SUCCESS);
@@ -189,7 +237,7 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 		cl_event profilingEvent;
 
-		size_t localSize = kernelWorkGroupSize.value();
+		size_t localSize = kernelWorkGroupSize;
 		size_t globalSize = ((N + localSize - 1) / localSize) * localSize;
 
 		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0,
@@ -206,114 +254,56 @@ int hashCheck_v2(ClStuffContainer &clStuffContainer, const std::string &pwFileNa
 
 		logger.log("kernel exec time", kernelExecTime / 1e6); // 1e6, lai dabūtu rezultātu milisekundēs
 
+		clReleaseEvent(profilingEvent);
+
 		clResult = clEnqueueReadBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(int), &crackedIdx,
 									   0, nullptr, nullptr);
 		assert(clResult == CL_SUCCESS);
 
 		if (crackedIdx != -1)
 		{
-			// nez vai smukākais risinājums, bet strādā
+
 			cl_uint pwStart = batchedOffsets[crackedIdx];
-			size_t pwSize = current_pw_size(batchedOffsets, i, charCount, crackedIdx);
+			size_t pwSize;
+
+			if (static_cast<cl_uint>(crackedIdx) < N - 1)
+			{
+				pwSize = batchedOffsets[crackedIdx + 1] - pwStart;
+			}
+			else
+			{
+				pwSize = charCount - pwStart;
+			}
+
 			foundPw = std::string(reinterpret_cast<const char *>(&batchedKernelPasswords[pwStart]), pwSize);
 
 			crackedIdx += (lineIdx - i); // indekss ir relatīvs batcham, tāpēc vajag offsetu pieskaitīt
+
+			// Clean up resources before returning
+			clReleaseMemObject(pinnedPasswordsHost);
+			clReleaseMemObject(pinnedOffsetsHost);
+			clReleaseMemObject(passwordsBuffer);
+			clReleaseMemObject(offsetsBuffer);
+			clReleaseMemObject(targetHashBuffer);
+			clReleaseMemObject(crackedIdxBuffer);
+			clReleaseKernel(kernel);
+
 			return crackedIdx;
 		}
 	}
 
+	file.close();
+
+	// Clean up resources before returning
+	clReleaseMemObject(pinnedPasswordsHost);
+	clReleaseMemObject(pinnedOffsetsHost);
+	clReleaseMemObject(passwordsBuffer);
+	clReleaseMemObject(offsetsBuffer);
+	clReleaseMemObject(targetHashBuffer);
+	clReleaseMemObject(crackedIdxBuffer);
+	clReleaseKernel(kernel);
+
 	return -1;
-}
-
-int hashCheck(ClStuffContainer &clStuffContainer, const std::vector<std::string> &passwords, std::vector<cl_uint> &hash,
-			  BenchmarkLogger &logger)
-{
-	// sha256 hash vērtībai jābūt 256 biti / 32 baiti
-	assert(hash.size() * sizeof(cl_uint) == 32);
-
-	cl_int clResult;
-
-	std::vector<cl_uchar> kernelPasswords;
-	std::vector<cl_uint> offsets;
-	cl_int crackedIdx = -1;
-
-	int currentOffset = 0;
-	for (const auto &password : passwords)
-	{
-		offsets.push_back(currentOffset);
-		kernelPasswords.insert(kernelPasswords.end(), password.begin(), password.end());
-		currentOffset += password.size();
-	}
-
-	auto bufferCreationStart = std::chrono::steady_clock::now();
-
-	cl_mem passwordsBuffer =
-		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-					   kernelPasswords.size() * sizeof(cl_uchar), kernelPasswords.data(), &clResult);
-	assert(clResult == CL_SUCCESS);
-
-	cl_mem offsetsBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-										  offsets.size() * sizeof(cl_uint), offsets.data(), &clResult);
-	assert(clResult == CL_SUCCESS);
-
-	cl_mem targetHashBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-											 hash.size() * sizeof(cl_uint), hash.data(), &clResult);
-	assert(clResult == CL_SUCCESS);
-
-	cl_mem crackedIdxBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-											 sizeof(cl_int), &crackedIdx, &clResult);
-	assert(clResult == CL_SUCCESS);
-
-	auto bufferCreationEnd = std::chrono::steady_clock::now();
-
-	logger.chronoLog("buffer creation time", bufferCreationStart, bufferCreationEnd);
-
-	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/sha256.cl", "sha256_crack");
-
-	cl_uint N = passwords.size();
-	cl_uint charCount = kernelPasswords.size();
-
-	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &passwordsBuffer);
-	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &offsetsBuffer);
-	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 2, sizeof(cl_uint), &N);
-	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 3, sizeof(cl_uint), &charCount);
-	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 4, sizeof(cl_mem), &targetHashBuffer);
-	assert(clResult == CL_SUCCESS);
-	clResult = clSetKernelArg(kernel, 5, sizeof(cl_mem), &crackedIdxBuffer);
-	assert(clResult == CL_SUCCESS);
-
-	cl_event profilingEvent;
-
-	size_t kernelWorkGroupSize;
-	clGetKernelWorkGroupInfo(kernel, clStuffContainer.device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t),
-							 &kernelWorkGroupSize, nullptr);
-
-	size_t localSize = kernelWorkGroupSize;
-	size_t globalSize = ((N + localSize - 1) / localSize) * localSize;
-
-	clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 1, nullptr, &globalSize, &localSize, 0, nullptr,
-									  &profilingEvent);
-	assert(clResult == CL_SUCCESS);
-
-	cl_ulong start;
-	cl_ulong end;
-
-	clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
-	clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
-
-	double kernelExecTime = static_cast<double>(end - start);
-
-	logger.log("kernel exec time", kernelExecTime / 1e6); // 1e6, lai dabūtu rezultātu milisekundēs
-
-	clResult = clEnqueueReadBuffer(clStuffContainer.queue, crackedIdxBuffer, CL_TRUE, 0, sizeof(int), &crackedIdx, 0,
-								   nullptr, nullptr);
-	assert(clResult == CL_SUCCESS);
-
-	return crackedIdx;
 }
 
 int main(int argc, char *argv[])
@@ -334,15 +324,18 @@ int main(int argc, char *argv[])
 
 		std::string foundPw;
 
-		int crackedIdx = hashCheck_v2(clStuffContainer, inputFileName, hash, foundPw, logger);
+		std::cout << "Starting search...\n";
+
+		int crackedIdx = hashCheck_v2_with_pinned_memory(clStuffContainer, inputFileName, hash, foundPw, logger);
 
 		auto hashCheckEnd = std::chrono::steady_clock::now();
 
-		logger.chronoLog("total pw cracker kernel time", hashCheckStart, hashCheckEnd);
+		logger.chronoLog("hash check time", hashCheckStart, hashCheckEnd);
 
 		if (crackedIdx == -1)
 		{
-			std::cout << "Password not found!\n";
+
+			std::cout << "No matching password found." << "\n";
 			return 0;
 		}
 
