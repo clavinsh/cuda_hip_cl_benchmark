@@ -1,6 +1,6 @@
 #include "clBenchmark.h"
+#include "clStuff.h"
 #include <CL/cl.h>
-#include <CL/cl_platform.h>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -10,132 +10,10 @@
 #include <iomanip>
 #include <iostream>
 #include <ostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
-
-// makro assertam ar ziņojumu
-// ņemts no: https://stackoverflow.com/questions/3767869/adding-message-to-assert
-#ifndef NDEBUG
-#define ASSERT(condition, message)                                                                                     \
-	do                                                                                                                 \
-	{                                                                                                                  \
-		if (!(condition))                                                                                              \
-		{                                                                                                              \
-			std::cerr << "Assertion `" #condition "` failed in " << __FILE__ << " line " << __LINE__ << ": "           \
-					  << message << std::endl;                                                                         \
-			std::terminate();                                                                                          \
-		}                                                                                                              \
-	} while (false)
-#else
-#define ASSERT(condition, message)                                                                                     \
-	do                                                                                                                 \
-	{                                                                                                                  \
-	} while (false)
-#endif
-
-// metode OpenCL kļūdu kodu pārveidei uz tekstu, iedvesmojoties no hashcat val2cstr_cl
-// https://github.com/hashcat/hashcat/blob/master/src/ext_OpenCL.c
-std::string ClErrorCodesToString(cl_int clError)
-{
-#define CLERR(a)                                                                                                       \
-	case a:                                                                                                            \
-		return #a
-
-	switch (clError)
-	{
-		CLERR(CL_SUCCESS);
-		CLERR(CL_BUILD_PROGRAM_FAILURE);
-		CLERR(CL_COMPILE_PROGRAM_FAILURE);
-		CLERR(CL_COMPILER_NOT_AVAILABLE);
-		CLERR(CL_DEVICE_NOT_FOUND);
-		CLERR(CL_DEVICE_NOT_AVAILABLE);
-		CLERR(CL_DEVICE_PARTITION_FAILED);
-		CLERR(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
-		CLERR(CL_IMAGE_FORMAT_MISMATCH);
-		CLERR(CL_IMAGE_FORMAT_NOT_SUPPORTED);
-		CLERR(CL_INVALID_ARG_INDEX);
-		CLERR(CL_INVALID_ARG_SIZE);
-		CLERR(CL_INVALID_ARG_VALUE);
-		CLERR(CL_INVALID_BINARY);
-		CLERR(CL_INVALID_BUFFER_SIZE);
-		CLERR(CL_INVALID_BUILD_OPTIONS);
-		CLERR(CL_INVALID_COMMAND_QUEUE);
-		CLERR(CL_INVALID_COMPILER_OPTIONS);
-		CLERR(CL_INVALID_CONTEXT);
-		CLERR(CL_INVALID_DEVICE);
-		CLERR(CL_INVALID_DEVICE_PARTITION_COUNT);
-		CLERR(CL_INVALID_DEVICE_QUEUE);
-		CLERR(CL_INVALID_DEVICE_TYPE);
-		CLERR(CL_INVALID_EVENT);
-		CLERR(CL_INVALID_EVENT_WAIT_LIST);
-		CLERR(CL_INVALID_GLOBAL_OFFSET);
-		CLERR(CL_INVALID_GLOBAL_WORK_SIZE);
-		CLERR(CL_INVALID_HOST_PTR);
-		CLERR(CL_INVALID_IMAGE_DESCRIPTOR);
-		CLERR(CL_INVALID_IMAGE_FORMAT_DESCRIPTOR);
-		CLERR(CL_INVALID_IMAGE_SIZE);
-		CLERR(CL_INVALID_KERNEL);
-		CLERR(CL_INVALID_KERNEL_ARGS);
-		CLERR(CL_INVALID_KERNEL_DEFINITION);
-		CLERR(CL_INVALID_KERNEL_NAME);
-		CLERR(CL_INVALID_LINKER_OPTIONS);
-		CLERR(CL_INVALID_MEM_OBJECT);
-		CLERR(CL_INVALID_OPERATION);
-		CLERR(CL_INVALID_PIPE_SIZE);
-		CLERR(CL_INVALID_PLATFORM);
-		CLERR(CL_INVALID_PROGRAM);
-		CLERR(CL_INVALID_PROGRAM_EXECUTABLE);
-		CLERR(CL_INVALID_PROPERTY);
-		CLERR(CL_INVALID_QUEUE_PROPERTIES);
-		CLERR(CL_INVALID_SAMPLER);
-		CLERR(CL_INVALID_SPEC_ID);
-		CLERR(CL_INVALID_VALUE);
-		CLERR(CL_INVALID_WORK_DIMENSION);
-		CLERR(CL_INVALID_WORK_GROUP_SIZE);
-		CLERR(CL_INVALID_WORK_ITEM_SIZE);
-		CLERR(CL_KERNEL_ARG_INFO_NOT_AVAILABLE);
-		CLERR(CL_LINK_PROGRAM_FAILURE);
-		CLERR(CL_LINKER_NOT_AVAILABLE);
-		CLERR(CL_MAP_FAILURE);
-		CLERR(CL_MEM_COPY_OVERLAP);
-		CLERR(CL_MEM_OBJECT_ALLOCATION_FAILURE);
-		CLERR(CL_MISALIGNED_SUB_BUFFER_OFFSET);
-		CLERR(CL_OUT_OF_HOST_MEMORY);
-		CLERR(CL_OUT_OF_RESOURCES);
-		CLERR(CL_MAX_SIZE_RESTRICTION_EXCEEDED);
-		CLERR(CL_PROFILING_INFO_NOT_AVAILABLE);
-		// CLERR(CL_INVALID_COMMAND_BUFFER_KHR);
-		// CLERR(CL_INVALID_SYNC_POINT_WAIT_LIST_KHR);
-		// CLERR(CL_INCOMPATIBLE_COMMAND_QUEUE_KHR);
-		// CLERR(CL_INVALID_MUTABLE_COMMAND_KHR);
-		// CLERR(CL_INVALID_D3D10_DEVICE_KHR);
-		// CLERR(CL_INVALID_D3D10_RESOURCE_KHR);
-		// CLERR(CL_D3D10_RESOURCE_ALREADY_ACQUIRED_KHR);
-		// CLERR(CL_D3D10_RESOURCE_NOT_ACQUIRED_KHR);
-		// CLERR(CL_INVALID_D3D11_DEVICE_KHR);
-		// CLERR(CL_INVALID_D3D11_RESOURCE_KHR);
-		// CLERR(CL_D3D11_RESOURCE_ALREADY_ACQUIRED_KHR);
-		// CLERR(CL_D3D11_RESOURCE_NOT_ACQUIRED_KHR);
-		// CLERR(CL_INVALID_DX9_MEDIA_ADAPTER_KHR);
-		// CLERR(CL_INVALID_DX9_MEDIA_SURFACE_KHR);
-		// CLERR(CL_DX9_MEDIA_SURFACE_ALREADY_ACQUIRED_KHR);
-		// CLERR(CL_DX9_MEDIA_SURFACE_NOT_ACQUIRED_KHR);
-		// CLERR(CL_EGL_RESOURCE_NOT_ACQUIRED_KHR);
-		// CLERR(CL_INVALID_EGL_OBJECT_KHR);
-		CLERR(CL_INVALID_GL_OBJECT);
-		// CLERR(CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR);
-		// CLERR(CL_PLATFORM_NOT_FOUND_KHR);
-		// CLERR(CL_INVALID_SEMAPHORE_KHR);
-		// CLERR(CL_CONTEXT_TERMINATED_KHR);
-	}
-
-#undef CLERR
-
-	return "UNKOWN CL ERROR (value " + std::to_string(clError) + ")";
-}
 
 // debug vajadzībām
 void printCharacterBytes(char c)
@@ -170,43 +48,59 @@ void processGridFileLine(std::vector<uint8_t> &grid, const std::string &line)
 // met ārā kļūdas ja nav atbilstošu simbolu (1, 0) vai ja kāda rindiņa nesatur tādu pašu simbolu skaitu kā pirmā
 std::vector<cl_uchar> loadGridFromFile(const std::string &fileName, size_t &width, size_t &height)
 {
-	std::vector<cl_uchar> grid;
-	height = 0; // noteiks iteratīvi pēc rindiņu skaita failā, tāpēc sākumā 0
+	// ejam uz faila beigām uzreiz ar 'ate', lai noteiktu faila izmēru, pēc tam iesim uz sākumu
+	std::ifstream file(fileName, std::ios::ate | std::ios::binary);
 
-	std::ifstream file(fileName);
 	if (!file.is_open())
 	{
 		throw std::runtime_error("Failed to open file: " + fileName);
 	}
 
-	std::string line;
+	const size_t fileSize = file.tellg();
+	file.seekg(0, std::ios::beg);
 
-	// pēc pirmās rindas nosakām width
-	if (std::getline(file, line))
-	{
-		width = line.size();
-		height++;
-		processGridFileLine(grid, line);
-	}
-	else
-	{
-		throw std::runtime_error(fileName + " file empty?");
-	}
+	std::vector<char> buffer(fileSize);
+	file.read(buffer.data(), fileSize);
+	file.close();
 
-	while (std::getline(file, line))
-	{
-		height++;
+	std::vector<cl_uchar> grid;
+	grid.reserve(fileSize);
 
-		if (line.size() != width)
+	size_t lineStartPos = 0;
+
+	width = 0;
+	height = 0;
+
+	for (size_t i = 0; i <= buffer.size(); ++i)
+	{
+		if (i == buffer.size() || buffer[i] == '\n')
 		{
-			throw std::runtime_error("Line width (" + std::to_string(line.size()) +
-									 ")"
-									 " at line " +
-									 std::to_string(height) + " does not match the first line's width (" +
-									 std::to_string(width) + ")");
-		}
+			size_t lineLen = i - lineStartPos;
 
-		processGridFileLine(grid, line);
+			if (lineLen == 0)
+			{
+				lineStartPos = i + 1;
+				continue;
+			}
+
+			if (width == 0)
+			{
+				width = lineLen;
+			}
+			else if (lineLen != width)
+			{
+				throw std::runtime_error("Invalid line length at line idx: " + std::to_string(height));
+			}
+
+			for (size_t j = 0; j < width; ++j)
+			{
+				cl_uchar val = static_cast<cl_uchar>(buffer[lineStartPos + j] - '0'); // adjust as needed
+				grid.push_back(val);
+			}
+
+			height++;
+			lineStartPos = i + 1;
+		}
 	}
 
 	return grid;
@@ -219,11 +113,8 @@ void writeGridToFile(std::vector<cl_uchar> &grid, cl_ulong width, cl_ulong heigh
 	{
 		throw std::runtime_error("Failed to open file: " + fileName);
 	}
-
 	std::string line;
-
 	line.reserve(width + 1);
-
 	for (size_t h = 0; h < height; h++)
 	{
 		line.clear();
@@ -232,92 +123,57 @@ void writeGridToFile(std::vector<cl_uchar> &grid, cl_ulong width, cl_ulong heigh
 			line += std::to_string(static_cast<int>(grid[h * width + w]));
 		}
 		line += "\n";
-
 		file.write(line.data(), line.size());
 	}
 }
 
-// funkcija paredzēta OpenCL kodolu failu atvēršanai un satura (pirmkoda) iegūšanai
-std::string readKernelFile(const std::string &fileName)
+void writeGridToBinaryFile(std::vector<cl_uchar> &grid, cl_ulong width, cl_ulong height, std::string fileName)
 {
-	std::ifstream file(fileName);
+	std::ofstream file(fileName, std::ios::out | std::ios::binary);
 	if (!file.is_open())
 	{
-		throw std::runtime_error("Failed to open kernel file: " + fileName);
+		throw std::runtime_error("Failed to open file: " + fileName);
 	}
 
-	std::stringstream sourceCodeBuffer;
+	// Write dimensions as header (8 bytes each for width and height)
+	file.write(reinterpret_cast<const char *>(&width), sizeof(width));
+	file.write(reinterpret_cast<const char *>(&height), sizeof(height));
 
-	sourceCodeBuffer << file.rdbuf();
-	return sourceCodeBuffer.str();
+	// Write grid data directly (1 byte per cell)
+	file.write(reinterpret_cast<const char *>(grid.data()), grid.size());
+
+	file.close();
 }
 
-class ClStuffContainer
+void writeGridToFile_v2(std::vector<cl_uchar> &grid, cl_ulong width, cl_ulong height, std::string fileName)
 {
-  private:
-	BenchmarkLogger &logger;
+	std::ofstream file(fileName, std::ios::out | std::ios::binary);
 
-  public:
-	cl_int clResult; // paredzēts openCL funkciju izsaukumu rezultātu saglabāšanai un pārbaudei
-	cl_platform_id platform;
-	cl_device_id device;
-	cl_uint numPlatforms;
-	cl_uint numDevices;
-	cl_context context;
-	cl_command_queue queue;
-
-	ClStuffContainer(BenchmarkLogger &logger) : logger(logger)
+	if (!file.is_open())
 	{
-		clResult = clGetPlatformIDs(1, &platform, &numPlatforms);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		clResult = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &clResult);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		const cl_queue_properties properties[] = {CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0};
-
-		queue = clCreateCommandQueueWithProperties(context, device, properties, &clResult);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		throw std::runtime_error("Failed to open file: " + fileName);
 	}
 
-	~ClStuffContainer()
+	const size_t bufSize = (width + 1) * height; // +1, jo \n rindu beigās
+
+	std::vector<char> buffer(bufSize);
+
+	for (size_t h = 0; h < height; h++)
 	{
+		size_t lineStart = h + (width + 1);
+		size_t gridRowStart = h * width;
 
-		clResult = clReleaseCommandQueue(queue);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		for (size_t w = 0; w < width; w++)
+		{
+			buffer[lineStart + w] = '0' + grid[gridRowStart + w]; // ASCII kodu 'haks'
+		}
 
-		clResult = clReleaseContext(context);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		buffer[lineStart + width] = '\n';
 	}
 
-	cl_kernel loadAndCreateKernel(const std::string &fileName, const std::string &kernelName)
-	{
-		std::string kernelSource = readKernelFile(fileName);
-
-		const char *kernelSourceCstring = kernelSource.c_str();
-		size_t kernelSize = kernelSource.length();
-
-		auto start = std::chrono::steady_clock::now();
-
-		cl_program program = clCreateProgramWithSource(context, 1, &kernelSourceCstring, &kernelSize, &clResult);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		clResult = clBuildProgram(program, 1, &device, "-cl-std=CL3.0", nullptr, nullptr);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		cl_kernel kernel = clCreateKernel(program, kernelName.c_str(), &clResult);
-		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		auto end = std::chrono::steady_clock::now();
-
-		logger.chronoLog("kernel compile time", start, end);
-
-		return kernel;
-	}
-};
+	file.write(buffer.data(), bufSize);
+	file.close();
+}
 
 // funkcija, kas sakārto visu kodola izpildei un datu savākšanai
 // outputGrid izmēru saucēja fn var nenoteikt, jo šī pati funkcija sakārtos atmiņu
@@ -406,6 +262,192 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	clReleaseMemObject(gridBuffer);
 	clReleaseMemObject(outputGridBuffer);
+}
+
+void GameOfLifeStep_v2(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &grid,
+					   std::vector<cl_uchar> &outputGrid, cl_ulong width, cl_ulong height, size_t steps,
+					   BenchmarkLogger &logger)
+{
+	cl_int clResult;
+	const size_t STEPS_PER_KERNEL = 4; // Process multiple steps per kernel invocation
+
+	size_t gridSize = width * height;
+	outputGrid.resize(gridSize);
+
+	auto start = std::chrono::steady_clock::now();
+
+	// Create pinned memory buffers for faster host-device transfers
+	cl_mem hostPinnedInputBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+												  gridSize * sizeof(cl_uchar), nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	cl_mem hostPinnedOutputBuffer = clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+												   gridSize * sizeof(cl_uchar), nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	// Map pinned memory to get host accessible pointers
+	void *mappedInputPtr = clEnqueueMapBuffer(clStuffContainer.queue, hostPinnedInputBuffer, CL_TRUE, CL_MAP_WRITE, 0,
+											  gridSize * sizeof(cl_uchar), 0, nullptr, nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	void *mappedOutputPtr = clEnqueueMapBuffer(clStuffContainer.queue, hostPinnedOutputBuffer, CL_TRUE, CL_MAP_WRITE, 0,
+											   gridSize * sizeof(cl_uchar), 0, nullptr, nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	// Copy input data to pinned memory
+	std::memcpy(mappedInputPtr, grid.data(), gridSize * sizeof(cl_uchar));
+
+	// Create device buffers (these stay on the device)
+	cl_mem deviceInputBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, gridSize * sizeof(cl_uchar), nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	cl_mem deviceOutputBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, gridSize * sizeof(cl_uchar), nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	cl_mem deviceTempBuffer =
+		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, gridSize * sizeof(cl_uchar), nullptr, &clResult);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	auto end = std::chrono::steady_clock::now();
+	logger.chronoLog("buffer creation time", start, end);
+
+	// Create event for timing
+	cl_event transferEvent;
+
+	// Start timing the transfer
+	start = std::chrono::steady_clock::now();
+
+	// Transfer input data from pinned memory to device
+	clResult = clEnqueueWriteBuffer(clStuffContainer.queue, deviceInputBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
+									mappedInputPtr, 0, nullptr, &transferEvent);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	// Wait for transfer to complete
+	clWaitForEvents(1, &transferEvent);
+
+	// Get timing info
+	cl_ulong transferStart, transferEnd;
+	clGetEventProfilingInfo(transferEvent, CL_PROFILING_COMMAND_START, sizeof(transferStart), &transferStart, nullptr);
+	clGetEventProfilingInfo(transferEvent, CL_PROFILING_COMMAND_END, sizeof(transferEnd), &transferEnd, nullptr);
+
+	double transferTime = static_cast<double>(transferEnd - transferStart) / 1e6; // Convert to ms
+	logger.log("host-to-device transfer time", transferTime);
+
+	end = std::chrono::steady_clock::now();
+	logger.chronoLog("total host-to-device transfer time", start, end);
+
+	// Load and create kernel for multi-step processing
+	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol_multi_step");
+
+	// Determine optimal work group size
+	size_t localSize[2];
+	clStuffContainer.getOptimalWorkGroupSize(kernel, localSize);
+
+	// Calculate global work size
+	size_t globalSize[2] = {((width + localSize[0] - 1) / localSize[0]) * localSize[0],
+							((height + localSize[1] - 1) / localSize[1]) * localSize[1]};
+
+	// Set kernel arguments that don't change
+	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &deviceInputBuffer);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &deviceOutputBuffer);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 2, sizeof(cl_mem), &deviceTempBuffer);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &width);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 4, sizeof(cl_ulong), &height);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	double totalTime = 0;
+
+	// Process steps in batches
+	for (size_t step = 0; step < steps; step += STEPS_PER_KERNEL)
+	{
+		cl_uchar stepsThisIteration = (cl_uchar)std::min(STEPS_PER_KERNEL, steps - step);
+
+		// Set the number of steps to process
+		clResult = clSetKernelArg(kernel, 5, sizeof(cl_uchar), &stepsThisIteration);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+		cl_event profilingEvent;
+
+		// Execute kernel
+		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 2, nullptr, globalSize, localSize, 0, nullptr,
+										  &profilingEvent);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+		clFinish(clStuffContainer.queue);
+
+		// Measure kernel execution time
+		cl_ulong start;
+		cl_ulong end;
+
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_START, sizeof(start), &start, nullptr);
+		clGetEventProfilingInfo(profilingEvent, CL_PROFILING_COMMAND_COMPLETE, sizeof(end), &end, nullptr);
+
+		double kernelExecTime = static_cast<double>(end - start);
+		logger.log("batch kernel exec time", kernelExecTime / 1e6);
+		totalTime += kernelExecTime;
+
+		// Swap input and output buffers for next iteration if needed
+		if (stepsThisIteration % 2 == 0)
+		{
+			// No swap needed, result is already in inputBuffer
+		}
+		else
+		{
+			std::swap(deviceInputBuffer, deviceOutputBuffer);
+		}
+
+		// Release the event
+		clReleaseEvent(profilingEvent);
+	}
+
+	logger.log("total kernel exec time", totalTime / 1e6);
+
+	// Start timing the transfer back
+	start = std::chrono::steady_clock::now();
+
+	// Read back final result to pinned memory
+	clResult = clEnqueueReadBuffer(clStuffContainer.queue, deviceInputBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
+								   mappedOutputPtr, 0, nullptr, &transferEvent);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	// Wait for transfer to complete
+	clWaitForEvents(1, &transferEvent);
+
+	// Get timing info
+	clGetEventProfilingInfo(transferEvent, CL_PROFILING_COMMAND_START, sizeof(transferStart), &transferStart, nullptr);
+	clGetEventProfilingInfo(transferEvent, CL_PROFILING_COMMAND_END, sizeof(transferEnd), &transferEnd, nullptr);
+
+	transferTime = static_cast<double>(transferEnd - transferStart) / 1e6; // Convert to ms
+	logger.log("device-to-host transfer time", transferTime);
+
+	// Copy from pinned memory to output vector
+	std::memcpy(outputGrid.data(), mappedOutputPtr, gridSize * sizeof(cl_uchar));
+
+	end = std::chrono::steady_clock::now();
+	logger.chronoLog("total device-to-host transfer time", start, end);
+
+	// Unmap pinned memory
+	clResult =
+		clEnqueueUnmapMemObject(clStuffContainer.queue, hostPinnedInputBuffer, mappedInputPtr, 0, nullptr, nullptr);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	clResult =
+		clEnqueueUnmapMemObject(clStuffContainer.queue, hostPinnedOutputBuffer, mappedOutputPtr, 0, nullptr, nullptr);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	// Release resources
+	clReleaseMemObject(hostPinnedInputBuffer);
+	clReleaseMemObject(hostPinnedOutputBuffer);
+	clReleaseMemObject(deviceInputBuffer);
+	clReleaseMemObject(deviceOutputBuffer);
+	clReleaseMemObject(deviceTempBuffer);
+	clReleaseKernel(kernel);
+	clReleaseEvent(transferEvent);
 }
 
 int main(int argc, char *argv[])
