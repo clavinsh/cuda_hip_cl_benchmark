@@ -4,15 +4,12 @@
 #include <assert.h>
 #include <cassert>
 #include <chrono>
-#include <cstdint>
 #include <cstring>
 #include <cuda/std/cstdint> // analogs C/C++ <cstdint>, bet nodrošina fiksētus datu tipu lielumus uz device
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,27 +126,22 @@ void writeGridToFile(std::vector<unsigned char> &grid, size_t width, size_t heig
 	file.close();
 }
 
-__global__ void golMultiStepKernel(const unsigned char *input, unsigned char *output, unsigned char *temp, size_t width,
-								   size_t height, size_t stepsToProcess)
+__constant__ size_t d_width;
+__constant__ size_t d_height;
+
+// Simplified CUDA kernel more closely matching the OpenCL version
+__global__ void golMultiStepKernel(const unsigned char *input, unsigned char *output, unsigned char *temp,
+								   size_t stepsToProcess)
 {
 	// Thread indices
 	const int x = blockIdx.x * blockDim.x + threadIdx.x;
 	const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	// Shared memory for caching cells in block plus 1-cell halo
-	extern __shared__ unsigned char sharedMem[];
-	const int tx = threadIdx.x;
-	const int ty = threadIdx.y;
-	const int block_width = blockDim.x + 2; // +2 for halo
-
-// Convert 2D to 1D index for shared memory access
-#define SH_IDX(y, x) ((y) * block_width + (x))
-
-	// Check if thread is within grid bounds
-	if (x >= width || y >= height)
+	// Check if thread is within grid bounds (early exit)
+	if (x >= d_width || y >= d_height)
 		return;
 
-	const size_t flatIdx = y * width + x;
+	const size_t flatIdx = y * d_width + x;
 
 	// Copy input to temp
 	temp[flatIdx] = input[flatIdx];
@@ -163,70 +155,49 @@ __global__ void golMultiStepKernel(const unsigned char *input, unsigned char *ou
 		const unsigned char *curr = (step % 2 == 0) ? temp : output;
 		unsigned char *next = (step % 2 == 0) ? output : temp;
 
-		// Load cell data into shared memory - center cell
-		sharedMem[SH_IDX(ty + 1, tx + 1)] = curr[flatIdx];
-
-		// Load halo cells - threads at block edges
-		if (tx == 0 && x > 0)
-		{ // Left edge
-			sharedMem[SH_IDX(ty + 1, 0)] = curr[y * width + (x - 1)];
-		}
-		if (tx == blockDim.x - 1 && x + 1 < width)
-		{ // Right edge
-			sharedMem[SH_IDX(ty + 1, tx + 2)] = curr[y * width + (x + 1)];
-		}
-		if (ty == 0 && y > 0)
-		{ // Top edge
-			sharedMem[SH_IDX(0, tx + 1)] = curr[(y - 1) * width + x];
-		}
-		if (ty == blockDim.y - 1 && y + 1 < height)
-		{ // Bottom edge
-			sharedMem[SH_IDX(ty + 2, tx + 1)] = curr[(y + 1) * width + x];
-		}
-
-		// Load corner halo cells
-		if (tx == 0 && ty == 0 && x > 0 && y > 0)
-		{ // Top-left
-			sharedMem[SH_IDX(0, 0)] = curr[(y - 1) * width + (x - 1)];
-		}
-		if (tx == blockDim.x - 1 && ty == 0 && x + 1 < width && y > 0)
-		{ // Top-right
-			sharedMem[SH_IDX(0, tx + 2)] = curr[(y - 1) * width + (x + 1)];
-		}
-		if (tx == 0 && ty == blockDim.y - 1 && x > 0 && y + 1 < height)
-		{ // Bottom-left
-			sharedMem[SH_IDX(ty + 2, 0)] = curr[(y + 1) * width + (x - 1)];
-		}
-		if (tx == blockDim.x - 1 && ty == blockDim.y - 1 && x + 1 < width && y + 1 < height)
-		{ // Bottom-right
-			sharedMem[SH_IDX(ty + 2, tx + 2)] = curr[(y + 1) * width + (x + 1)];
-		}
-
-		// Ensure all threads have loaded data into shared memory
-		__syncthreads();
-
-		// Apply Game of Life rules using shared memory
+		// Count neighbors directly from global memory (like OpenCL version)
 		int neighbors = 0;
-		for (int dy = -1; dy <= 1; dy++)
+
+		// Top row
+		if (y > 0)
 		{
-			for (int dx = -1; dx <= 1; dx++)
-			{
-				if (dx == 0 && dy == 0)
-					continue;
+			// Top-left
+			if (x > 0)
+				neighbors += curr[(y - 1) * d_width + (x - 1)];
 
-				// Check for grid boundaries to avoid buffer overrun
-				int ny = y + dy;
-				int nx = x + dx;
-				if (ny < 0 || ny >= height || nx < 0 || nx >= width)
-					continue;
+			// Top-center
+			neighbors += curr[(y - 1) * d_width + x];
 
-				neighbors += sharedMem[SH_IDX(ty + 1 + dy, tx + 1 + dx)];
-			}
+			// Top-right
+			if (x < d_width - 1)
+				neighbors += curr[(y - 1) * d_width + (x + 1)];
+		}
+
+		// Middle row (excluding center)
+		if (x > 0)
+			neighbors += curr[y * d_width + (x - 1)]; // Middle-left
+
+		if (x < d_width - 1)
+			neighbors += curr[y * d_width + (x + 1)]; // Middle-right
+
+		// Bottom row
+		if (y < d_height - 1)
+		{
+			// Bottom-left
+			if (x > 0)
+				neighbors += curr[(y + 1) * d_width + (x - 1)];
+
+			// Bottom-center
+			neighbors += curr[(y + 1) * d_width + x];
+
+			// Bottom-right
+			if (x < d_width - 1)
+				neighbors += curr[(y + 1) * d_width + (x + 1)];
 		}
 
 		// Apply Game of Life rules (same logic as OpenCL version)
 		unsigned char cell = 0;
-		if (sharedMem[SH_IDX(ty + 1, tx + 1)] == 1)
+		if (curr[flatIdx] == 1)
 		{
 			if (neighbors == 2 || neighbors == 3)
 				cell = 1;
@@ -248,10 +219,9 @@ __global__ void golMultiStepKernel(const unsigned char *input, unsigned char *ou
 	{
 		output[flatIdx] = temp[flatIdx];
 	}
-
-#undef SH_IDX
 }
 
+// Main function to run Game of Life simulation with CUDA
 void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char> &outputGrid, size_t width,
 					size_t height, size_t steps, BenchmarkLogger &logger)
 {
@@ -270,6 +240,10 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 
 	// Copy grid to pinned memory
 	std::memcpy(hostPinnedInput, grid.data(), gridSize * sizeof(unsigned char));
+
+	// Copy width and height to constant memory
+	CUDA_CHECK(cudaMemcpyToSymbol(d_width, &width, sizeof(size_t)));
+	CUDA_CHECK(cudaMemcpyToSymbol(d_height, &height, sizeof(size_t)));
 
 	// Allocate device memory
 	unsigned char *deviceInput = nullptr;
@@ -302,11 +276,9 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	logger.chronoLog("total host-to-device transfer time", start, end);
 
 	// Setup kernel execution parameters
-	dim3 blockSize(16, 16); // 16x16 block size (optimal for many CUDA GPUs)
+	// Try different block sizes to find what works best for the hardware
+	dim3 blockSize(32, 8); // 32x8 for better memory coalescing
 	dim3 gridDim((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
-
-	// Calculate shared memory size - (blockSize.x + 2) * (blockSize.y + 2) for the halo
-	size_t sharedMemSize = (blockSize.x + 2) * (blockSize.y + 2) * sizeof(unsigned char);
 
 	double totalTime = 0;
 
@@ -316,9 +288,8 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 
 		CUDA_CHECK(cudaEventRecord(startEvent));
 
-		// Launch kernel with shared memory
-		golMultiStepKernel<<<gridDim, blockSize, sharedMemSize>>>(deviceInput, deviceOutput, deviceTemp, width, height,
-																  stepsThisIteration);
+		// Launch kernel without shared memory
+		golMultiStepKernel<<<gridDim, blockSize>>>(deviceInput, deviceOutput, deviceTemp, stepsThisIteration);
 
 		CUDA_CHECK(cudaEventRecord(endEvent));
 		CUDA_CHECK(cudaEventSynchronize(endEvent));
