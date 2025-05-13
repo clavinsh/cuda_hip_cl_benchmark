@@ -129,135 +129,98 @@ void writeGridToFile(std::vector<unsigned char> &grid, size_t width, size_t heig
 __constant__ size_t d_width;
 __constant__ size_t d_height;
 
-// Simplified CUDA kernel more closely matching the OpenCL version
-__global__ void golMultiStepKernel(const unsigned char *input, unsigned char *output, unsigned char *temp,
-								   size_t stepsToProcess)
+inline __device__ int neighborCount(int x, int y, const unsigned char *grid)
 {
-	// Thread indices
+	int neighbors = 0;
+
+	if (y > 0)
+	{
+		if (x > 0)
+			neighbors += grid[(y - 1) * d_width + (x - 1)];
+
+		neighbors += grid[(y - 1) * d_width + x];
+
+		if (x < d_width - 1)
+			neighbors += grid[(y - 1) * d_width + (x + 1)];
+	}
+
+	if (x > 0)
+		neighbors += grid[y * d_width + (x - 1)];
+
+	if (x < d_width - 1)
+		neighbors += grid[y * d_width + (x + 1)];
+
+	if (y < d_height - 1)
+	{
+		if (x > 0)
+			neighbors += grid[(y + 1) * d_width + (x - 1)];
+
+		neighbors += grid[(y + 1) * d_width + x];
+
+		if (x < d_width - 1)
+			neighbors += grid[(y + 1) * d_width + (x + 1)];
+	}
+
+	return neighbors;
+}
+
+__global__ void golMultiStepKernel(unsigned char *input, unsigned char *output)
+{
 	const int x = blockIdx.x * blockDim.x + threadIdx.x;
 	const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	// Check if thread is within grid bounds (early exit)
 	if (x >= d_width || y >= d_height)
 		return;
 
 	const size_t flatIdx = y * d_width + x;
 
-	// Copy input to temp
-	temp[flatIdx] = input[flatIdx];
+	int neighbors = neighborCount(x, y, input);
 
-	// Ensure all threads have written to temp
-	__syncthreads();
-
-	for (size_t step = 0; step < stepsToProcess; step++)
+	unsigned char cell = 0;
+	if (input[flatIdx] == 1)
 	{
-		// Ping-pong buffers (same as OpenCL version)
-		const unsigned char *curr = (step % 2 == 0) ? temp : output;
-		unsigned char *next = (step % 2 == 0) ? output : temp;
-
-		// Count neighbors directly from global memory (like OpenCL version)
-		int neighbors = 0;
-
-		// Top row
-		if (y > 0)
-		{
-			// Top-left
-			if (x > 0)
-				neighbors += curr[(y - 1) * d_width + (x - 1)];
-
-			// Top-center
-			neighbors += curr[(y - 1) * d_width + x];
-
-			// Top-right
-			if (x < d_width - 1)
-				neighbors += curr[(y - 1) * d_width + (x + 1)];
-		}
-
-		// Middle row (excluding center)
-		if (x > 0)
-			neighbors += curr[y * d_width + (x - 1)]; // Middle-left
-
-		if (x < d_width - 1)
-			neighbors += curr[y * d_width + (x + 1)]; // Middle-right
-
-		// Bottom row
-		if (y < d_height - 1)
-		{
-			// Bottom-left
-			if (x > 0)
-				neighbors += curr[(y + 1) * d_width + (x - 1)];
-
-			// Bottom-center
-			neighbors += curr[(y + 1) * d_width + x];
-
-			// Bottom-right
-			if (x < d_width - 1)
-				neighbors += curr[(y + 1) * d_width + (x + 1)];
-		}
-
-		// Apply Game of Life rules (same logic as OpenCL version)
-		unsigned char cell = 0;
-		if (curr[flatIdx] == 1)
-		{
-			if (neighbors == 2 || neighbors == 3)
-				cell = 1;
-		}
-		else
-		{
-			if (neighbors == 3)
-				cell = 1;
-		}
-
-		next[flatIdx] = cell;
-
-		// Ensure all threads complete before next iteration
-		__syncthreads();
+		if (neighbors == 2 || neighbors == 3)
+			cell = 1;
+	}
+	else
+	{
+		if (neighbors == 3)
+			cell = 1;
 	}
 
-	// If odd number of steps, ensure output has the final state
-	if (stepsToProcess % 2 == 1)
-	{
-		output[flatIdx] = temp[flatIdx];
-	}
+	output[flatIdx] = cell;
 }
 
-// Main function to run Game of Life simulation with CUDA
 void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char> &outputGrid, size_t width,
 					size_t height, size_t steps, BenchmarkLogger &logger)
 {
 
-	const size_t stepsPerKernel = 1 << 10; // 1024 steps per kernel invocation (same as OpenCL)
 	size_t gridSize = width * height;
 	outputGrid.resize(gridSize);
 
 	auto start = std::chrono::steady_clock::now();
 
-	// Allocate pinned memory for faster host-device transfers
 	unsigned char *hostPinnedInput = nullptr;
 	unsigned char *hostPinnedOutput = nullptr;
 	CUDA_CHECK(cudaMallocHost(&hostPinnedInput, gridSize * sizeof(unsigned char)));
 	CUDA_CHECK(cudaMallocHost(&hostPinnedOutput, gridSize * sizeof(unsigned char)));
 
-	// Copy grid to pinned memory
 	std::memcpy(hostPinnedInput, grid.data(), gridSize * sizeof(unsigned char));
 
-	// Copy width and height to constant memory
 	CUDA_CHECK(cudaMemcpyToSymbol(d_width, &width, sizeof(size_t)));
 	CUDA_CHECK(cudaMemcpyToSymbol(d_height, &height, sizeof(size_t)));
 
-	// Allocate device memory
 	unsigned char *deviceInput = nullptr;
 	unsigned char *deviceOutput = nullptr;
-	unsigned char *deviceTemp = nullptr;
 	CUDA_CHECK(cudaMalloc(&deviceInput, gridSize * sizeof(unsigned char)));
 	CUDA_CHECK(cudaMalloc(&deviceOutput, gridSize * sizeof(unsigned char)));
-	CUDA_CHECK(cudaMalloc(&deviceTemp, gridSize * sizeof(unsigned char)));
 
 	auto end = std::chrono::steady_clock::now();
+
 	logger.chronoLog("buffer creation time", start, end);
 
-	// Transfer data to device
 	start = std::chrono::steady_clock::now();
+
 	cudaEvent_t transferEvent, startEvent, endEvent;
 	CUDA_CHECK(cudaEventCreate(&transferEvent));
 	CUDA_CHECK(cudaEventCreate(&startEvent));
@@ -275,61 +238,55 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	end = std::chrono::steady_clock::now();
 	logger.chronoLog("total host-to-device transfer time", start, end);
 
-	// Setup kernel execution parameters
-	// Try different block sizes to find what works best for the hardware
-	dim3 blockSize(32, 8); // 32x8 for better memory coalescing
+	// lokālais bloka izmērs, šis likās diezgan ok
+	dim3 blockSize(32, 8);
 	dim3 gridDim((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
 	double totalTime = 0;
 
-	for (size_t step = 0; step < steps; step += stepsPerKernel)
+	unsigned char *currentInput = deviceInput;
+	unsigned char *currentOutput = deviceOutput;
+
+	for (size_t step = 0; step < steps; step++)
 	{
-		size_t stepsThisIteration = std::min(stepsPerKernel, steps - step);
 
 		CUDA_CHECK(cudaEventRecord(startEvent));
 
-		// Launch kernel without shared memory
-		golMultiStepKernel<<<gridDim, blockSize>>>(deviceInput, deviceOutput, deviceTemp, stepsThisIteration);
+		golMultiStepKernel<<<gridDim, blockSize>>>(currentInput, currentOutput);
 
 		CUDA_CHECK(cudaEventRecord(endEvent));
 		CUDA_CHECK(cudaEventSynchronize(endEvent));
 
-		// Check for kernel execution errors
 		CUDA_CHECK(cudaGetLastError());
 
 		float kernelExecTime = 0;
 		CUDA_CHECK(cudaEventElapsedTime(&kernelExecTime, startEvent, endEvent));
-		logger.log("batch kernel exec time", kernelExecTime);
+		logger.log("kernel exec time", kernelExecTime);
 		totalTime += kernelExecTime;
 
-		// Swap buffers if needed (same logic as OpenCL version)
-		if (stepsThisIteration % 2 != 0)
-		{
-			std::swap(deviceInput, deviceOutput);
-		}
+		std::swap(currentInput, currentOutput);
 	}
 
 	logger.log("total kernel exec time", totalTime);
 
-	// Transfer data back to host
 	start = std::chrono::steady_clock::now();
 
 	CUDA_CHECK(cudaEventRecord(startEvent));
-	CUDA_CHECK(cudaMemcpy(hostPinnedOutput, deviceInput, gridSize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+	// ņemot vērā pēdējo std::swap ar buferiem, pēdējā izeja atrodas input bufeŗi
+	CUDA_CHECK(cudaMemcpy(hostPinnedOutput, currentInput, gridSize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 	CUDA_CHECK(cudaEventRecord(transferEvent));
 	CUDA_CHECK(cudaEventSynchronize(transferEvent));
 
 	float transferBackTime = 0;
 	CUDA_CHECK(cudaEventElapsedTime(&transferBackTime, startEvent, transferEvent));
+
 	logger.log("device-to-host transfer time", transferBackTime);
 
-	// Copy the result to output grid
 	std::memcpy(outputGrid.data(), hostPinnedOutput, gridSize * sizeof(unsigned char));
 
 	end = std::chrono::steady_clock::now();
 	logger.chronoLog("total device-to-host transfer time", start, end);
 
-	// Cleanup
 	CUDA_CHECK(cudaEventDestroy(transferEvent));
 	CUDA_CHECK(cudaEventDestroy(startEvent));
 	CUDA_CHECK(cudaEventDestroy(endEvent));
@@ -337,7 +294,6 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	CUDA_CHECK(cudaFreeHost(hostPinnedOutput));
 	CUDA_CHECK(cudaFree(deviceInput));
 	CUDA_CHECK(cudaFree(deviceOutput));
-	CUDA_CHECK(cudaFree(deviceTemp));
 }
 
 int main(int argc, char *argv[])
