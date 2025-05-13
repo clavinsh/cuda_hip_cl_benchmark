@@ -113,7 +113,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 					cl_ulong width, cl_ulong height, size_t steps, BenchmarkLogger &logger)
 {
 	cl_int clResult;
-	const size_t stepsPerKernel = 1 << 10;
 
 	size_t gridSize = width * height;
 	outputGrid.resize(gridSize);
@@ -146,10 +145,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, gridSize * sizeof(cl_uchar), nullptr, &clResult);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-	cl_mem deviceTempBuffer =
-		clCreateBuffer(clStuffContainer.context, CL_MEM_READ_WRITE, gridSize * sizeof(cl_uchar), nullptr, &clResult);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
 	auto end = std::chrono::steady_clock::now();
 	logger.chronoLog("buffer creation time", start, end);
 
@@ -175,7 +170,7 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	logger.chronoLog("total host-to-device transfer time", start, end);
 
-	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol_multi_step");
+	cl_kernel kernel = clStuffContainer.loadAndCreateKernel("kernels/gol.cl", "gol");
 
 	size_t localSize[2];
 	clStuffContainer.getOptimalWorkGroupSize(kernel, localSize);
@@ -183,27 +178,25 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 	size_t globalSize[2] = {((width + localSize[0] - 1) / localSize[0]) * localSize[0],
 							((height + localSize[1] - 1) / localSize[1]) * localSize[1]};
 
-	clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &deviceInputBuffer);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &deviceOutputBuffer);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 2, sizeof(cl_mem), &deviceTempBuffer);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &width);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-	clResult = clSetKernelArg(kernel, 4, sizeof(cl_ulong), &height);
-	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
 	double totalTime = 0;
 
-	for (size_t step = 0; step < steps; step += stepsPerKernel)
+	cl_event profilingEvent;
+
+	cl_mem currentInput = deviceInputBuffer;
+	cl_mem currentOutput = deviceOutputBuffer;
+
+	clResult = clSetKernelArg(kernel, 2, sizeof(cl_ulong), &width);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+	clResult = clSetKernelArg(kernel, 3, sizeof(cl_ulong), &height);
+	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
+
+	for (size_t step = 0; step < steps; step++)
 	{
-		cl_ulong stepsThisIteration = std::min(stepsPerKernel, steps - step);
 
-		clResult = clSetKernelArg(kernel, 5, sizeof(cl_ulong), &stepsThisIteration);
+		clResult = clSetKernelArg(kernel, 0, sizeof(cl_mem), &currentInput);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
-
-		cl_event profilingEvent;
+		clResult = clSetKernelArg(kernel, 1, sizeof(cl_mem), &currentOutput);
+		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 		clResult = clEnqueueNDRangeKernel(clStuffContainer.queue, kernel, 2, nullptr, globalSize, localSize, 0, nullptr,
 										  &profilingEvent);
@@ -220,19 +213,16 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 		logger.log("batch kernel exec time", kernelExecTime / 1e6);
 		totalTime += kernelExecTime;
 
-		if (stepsThisIteration % 2 != 0)
-		{
-			std::swap(deviceInputBuffer, deviceOutputBuffer);
-		}
-
-		clReleaseEvent(profilingEvent);
+		std::swap(currentInput, currentOutput);
 	}
+
+	clReleaseEvent(profilingEvent);
 
 	logger.log("total kernel exec time", totalTime / 1e6);
 
 	start = std::chrono::steady_clock::now();
 
-	clResult = clEnqueueReadBuffer(clStuffContainer.queue, deviceInputBuffer, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
+	clResult = clEnqueueReadBuffer(clStuffContainer.queue, currentInput, CL_TRUE, 0, gridSize * sizeof(cl_uchar),
 								   mappedOutputPtr, 0, nullptr, &transferEvent);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
@@ -262,7 +252,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 	clReleaseMemObject(hostPinnedOutputBuffer);
 	clReleaseMemObject(deviceInputBuffer);
 	clReleaseMemObject(deviceOutputBuffer);
-	clReleaseMemObject(deviceTempBuffer);
 	clReleaseKernel(kernel);
 	clReleaseEvent(transferEvent);
 }

@@ -15,7 +15,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES})
 target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL spdlog::spdlog)
 
-target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror) 
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Werror -O3) 
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

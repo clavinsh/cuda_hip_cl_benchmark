@@ -1,66 +1,64 @@
 // Conway's Game of Life implementācija
 
-__kernel void gol_multi_step(__global const uchar *input, __global uchar *output, __global uchar *temp, ulong width,
-							 ulong height, ulong steps_to_process)
+inline int neighborCount(const size_t x, const size_t y, const ulong width, const ulong height,
+						 __global const uchar *grid)
 {
-	size_t x = get_global_id(0);
-	size_t y = get_global_id(1);
+	int neighbors = 0;
+
+	if (y > 0)
+	{
+		if (x > 0)
+			neighbors += grid[(y - 1) * width + (x - 1)];
+
+		neighbors += grid[(y - 1) * width + x];
+
+		if (x < width - 1)
+			neighbors += grid[(y - 1) * width + (x + 1)];
+	}
+
+	if (x > 0)
+		neighbors += grid[y * width + (x - 1)];
+
+	if (x < width - 1)
+		neighbors += grid[y * width + (x + 1)];
+
+	if (y < height - 1)
+	{
+		if (x > 0)
+			neighbors += grid[(y + 1) * width + (x - 1)];
+
+		neighbors += grid[(y + 1) * width + x];
+
+		if (x < width - 1)
+			neighbors += grid[(y + 1) * width + (x + 1)];
+	}
+
+	return neighbors;
+}
+
+__kernel void gol(__global const uchar *input, __global uchar *output, ulong width, ulong height)
+{
+	const int x = get_global_id(0);
+	const int y = get_global_id(1);
 
 	if (x >= width || y >= height)
 		return;
 
-	size_t flatIdx = y * width + x;
+	const size_t flatIdx = y * width + x;
 
+	int neighbors = neighborCount(x, y, width, height, input);
 
-	temp[flatIdx] = input[flatIdx];
-
-	barrier(CLK_GLOBAL_MEM_FENCE);
-
-	for (ulong step = 0; step < steps_to_process; step++)
+	uchar cell = 0;
+	if (input[flatIdx] == 1)
 	{
-		__global const uchar *curr = (step % 2 == 0) ? temp : output;
-		__global uchar *next = (step % 2 == 0) ? output : temp;
-
-		int neighbors = 0;
-		for (int dy = -1; dy <= 1; dy++)
-		{
-			int gy = (int)y + dy;
-			if (gy < 0 || gy >= height)
-				continue;
-
-			for (int dx = -1; dx <= 1; dx++)
-			{
-				int gx = (int)x + dx;
-				if (gx < 0 || gx >= width)
-					continue;
-
-				if (dx == 0 && dy == 0)
-					continue;
-
-				if (curr[gy * width + gx] == 1)
-					neighbors++;
-			}
-		}
-
-		uchar cell = 0;
-		if (curr[flatIdx] == 1)
-		{
-			if (neighbors == 2 || neighbors == 3)
-				cell = 1;
-		}
-		else
-		{
-			if (neighbors == 3)
-				cell = 1;
-		}
-
-		next[flatIdx] = cell;
-
-		barrier(CLK_GLOBAL_MEM_FENCE);
+		if (neighbors == 2 || neighbors == 3)
+			cell = 1;
+	}
+	else
+	{
+		if (neighbors == 3)
+			cell = 1;
 	}
 
-	if (steps_to_process % 2 == 1)
-	{
-		output[flatIdx] = temp[flatIdx];
-	}
+	output[flatIdx] = cell;
 }
