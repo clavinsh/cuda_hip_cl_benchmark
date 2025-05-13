@@ -128,193 +128,245 @@ void writeGridToFile(std::vector<unsigned char> &grid, size_t width, size_t heig
 
 	file.close();
 }
-__global__ void gol_step(const unsigned char *input, unsigned char *output, unsigned long long width,
-						 unsigned long long height)
-{
-	// Calculate global position
-	size_t x = blockIdx.x * blockDim.x + threadIdx.x;
-	size_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	// Check if within bounds
+__global__ void golMultiStepKernel(const unsigned char *input, unsigned char *output, unsigned char *temp, size_t width,
+								   size_t height, size_t stepsToProcess)
+{
+	// Thread indices
+	const int x = blockIdx.x * blockDim.x + threadIdx.x;
+	const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	// Shared memory for caching cells in block plus 1-cell halo
+	extern __shared__ unsigned char sharedMem[];
+	const int tx = threadIdx.x;
+	const int ty = threadIdx.y;
+	const int block_width = blockDim.x + 2; // +2 for halo
+
+// Convert 2D to 1D index for shared memory access
+#define SH_IDX(y, x) ((y) * block_width + (x))
+
+	// Check if thread is within grid bounds
 	if (x >= width || y >= height)
 		return;
 
-	// Calculate flat index
-	size_t idx = y * width + x;
+	const size_t flatIdx = y * width + x;
 
-	// Count neighbors
-	int neighbors = 0;
+	// Copy input to temp
+	temp[flatIdx] = input[flatIdx];
 
-	// Top row
-	if (y > 0)
+	// Ensure all threads have written to temp
+	__syncthreads();
+
+	for (size_t step = 0; step < stepsToProcess; step++)
 	{
-		// Top-left
-		if (x > 0 && input[(y - 1) * width + (x - 1)] == 1)
-			neighbors++;
-		// Top-center
-		if (input[(y - 1) * width + x] == 1)
-			neighbors++;
-		// Top-right
-		if (x + 1 < width && input[(y - 1) * width + (x + 1)] == 1)
-			neighbors++;
+		// Ping-pong buffers (same as OpenCL version)
+		const unsigned char *curr = (step % 2 == 0) ? temp : output;
+		unsigned char *next = (step % 2 == 0) ? output : temp;
+
+		// Load cell data into shared memory - center cell
+		sharedMem[SH_IDX(ty + 1, tx + 1)] = curr[flatIdx];
+
+		// Load halo cells - threads at block edges
+		if (tx == 0 && x > 0)
+		{ // Left edge
+			sharedMem[SH_IDX(ty + 1, 0)] = curr[y * width + (x - 1)];
+		}
+		if (tx == blockDim.x - 1 && x + 1 < width)
+		{ // Right edge
+			sharedMem[SH_IDX(ty + 1, tx + 2)] = curr[y * width + (x + 1)];
+		}
+		if (ty == 0 && y > 0)
+		{ // Top edge
+			sharedMem[SH_IDX(0, tx + 1)] = curr[(y - 1) * width + x];
+		}
+		if (ty == blockDim.y - 1 && y + 1 < height)
+		{ // Bottom edge
+			sharedMem[SH_IDX(ty + 2, tx + 1)] = curr[(y + 1) * width + x];
+		}
+
+		// Load corner halo cells
+		if (tx == 0 && ty == 0 && x > 0 && y > 0)
+		{ // Top-left
+			sharedMem[SH_IDX(0, 0)] = curr[(y - 1) * width + (x - 1)];
+		}
+		if (tx == blockDim.x - 1 && ty == 0 && x + 1 < width && y > 0)
+		{ // Top-right
+			sharedMem[SH_IDX(0, tx + 2)] = curr[(y - 1) * width + (x + 1)];
+		}
+		if (tx == 0 && ty == blockDim.y - 1 && x > 0 && y + 1 < height)
+		{ // Bottom-left
+			sharedMem[SH_IDX(ty + 2, 0)] = curr[(y + 1) * width + (x - 1)];
+		}
+		if (tx == blockDim.x - 1 && ty == blockDim.y - 1 && x + 1 < width && y + 1 < height)
+		{ // Bottom-right
+			sharedMem[SH_IDX(ty + 2, tx + 2)] = curr[(y + 1) * width + (x + 1)];
+		}
+
+		// Ensure all threads have loaded data into shared memory
+		__syncthreads();
+
+		// Apply Game of Life rules using shared memory
+		int neighbors = 0;
+		for (int dy = -1; dy <= 1; dy++)
+		{
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				if (dx == 0 && dy == 0)
+					continue;
+
+				// Check for grid boundaries to avoid buffer overrun
+				int ny = y + dy;
+				int nx = x + dx;
+				if (ny < 0 || ny >= height || nx < 0 || nx >= width)
+					continue;
+
+				neighbors += sharedMem[SH_IDX(ty + 1 + dy, tx + 1 + dx)];
+			}
+		}
+
+		// Apply Game of Life rules (same logic as OpenCL version)
+		unsigned char cell = 0;
+		if (sharedMem[SH_IDX(ty + 1, tx + 1)] == 1)
+		{
+			if (neighbors == 2 || neighbors == 3)
+				cell = 1;
+		}
+		else
+		{
+			if (neighbors == 3)
+				cell = 1;
+		}
+
+		next[flatIdx] = cell;
+
+		// Ensure all threads complete before next iteration
+		__syncthreads();
 	}
 
-	// Middle row
-	// Left
-	if (x > 0 && input[y * width + (x - 1)] == 1)
-		neighbors++;
-	// Right
-	if (x + 1 < width && input[y * width + (x + 1)] == 1)
-		neighbors++;
-
-	// Bottom row
-	if (y + 1 < height)
+	// If odd number of steps, ensure output has the final state
+	if (stepsToProcess % 2 == 1)
 	{
-		// Bottom-left
-		if (x > 0 && input[(y + 1) * width + (x - 1)] == 1)
-			neighbors++;
-		// Bottom-center
-		if (input[(y + 1) * width + x] == 1)
-			neighbors++;
-		// Bottom-right
-		if (x + 1 < width && input[(y + 1) * width + (x + 1)] == 1)
-			neighbors++;
+		output[flatIdx] = temp[flatIdx];
 	}
 
-	// Apply Conway's Game of Life rules
-	if (input[idx] == 1)
-	{
-		// Cell is alive
-		output[idx] = (neighbors == 2 || neighbors == 3) ? 1 : 0;
-	}
-	else
-	{
-		// Cell is dead
-		output[idx] = (neighbors == 3) ? 1 : 0;
-	}
+#undef SH_IDX
 }
 
-void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char> &outputGrid, unsigned long long width,
-					unsigned long long height, size_t steps, BenchmarkLogger &logger)
+void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char> &outputGrid, size_t width,
+					size_t height, size_t steps, BenchmarkLogger &logger)
 {
+
+	const size_t stepsPerKernel = 1 << 10; // 1024 steps per kernel invocation (same as OpenCL)
 	size_t gridSize = width * height;
 	outputGrid.resize(gridSize);
 
-	// Create CUDA events for timing
-	cudaEvent_t start_event, stop_event, kernel_start, kernel_stop;
-	CUDA_CHECK(cudaEventCreate(&start_event));
-	CUDA_CHECK(cudaEventCreate(&stop_event));
-	CUDA_CHECK(cudaEventCreate(&kernel_start));
-	CUDA_CHECK(cudaEventCreate(&kernel_stop));
-	float milliseconds = 0;
-
-	// Create CUDA streams for overlapping operations
-	cudaStream_t stream1, stream2;
-	CUDA_CHECK(cudaStreamCreate(&stream1));
-	CUDA_CHECK(cudaStreamCreate(&stream2));
-
-	// Start timing memory allocation
 	auto start = std::chrono::steady_clock::now();
 
-	// Use pinned memory for faster transfers
-	unsigned char *h_pinnedInput = nullptr;
-	unsigned char *h_pinnedOutput = nullptr;
-	CUDA_CHECK(cudaMallocHost(&h_pinnedInput, gridSize * sizeof(unsigned char)));
-	CUDA_CHECK(cudaMallocHost(&h_pinnedOutput, gridSize * sizeof(unsigned char)));
+	// Allocate pinned memory for faster host-device transfers
+	unsigned char *hostPinnedInput = nullptr;
+	unsigned char *hostPinnedOutput = nullptr;
+	CUDA_CHECK(cudaMallocHost(&hostPinnedInput, gridSize * sizeof(unsigned char)));
+	CUDA_CHECK(cudaMallocHost(&hostPinnedOutput, gridSize * sizeof(unsigned char)));
 
-	// Copy data to pinned memory
-	std::memcpy(h_pinnedInput, grid.data(), gridSize * sizeof(unsigned char));
+	// Copy grid to pinned memory
+	std::memcpy(hostPinnedInput, grid.data(), gridSize * sizeof(unsigned char));
 
 	// Allocate device memory
-	unsigned char *d_input = nullptr;
-	unsigned char *d_output = nullptr;
-	CUDA_CHECK(cudaMalloc(&d_input, gridSize * sizeof(unsigned char)));
-	CUDA_CHECK(cudaMalloc(&d_output, gridSize * sizeof(unsigned char)));
+	unsigned char *deviceInput = nullptr;
+	unsigned char *deviceOutput = nullptr;
+	unsigned char *deviceTemp = nullptr;
+	CUDA_CHECK(cudaMalloc(&deviceInput, gridSize * sizeof(unsigned char)));
+	CUDA_CHECK(cudaMalloc(&deviceOutput, gridSize * sizeof(unsigned char)));
+	CUDA_CHECK(cudaMalloc(&deviceTemp, gridSize * sizeof(unsigned char)));
 
 	auto end = std::chrono::steady_clock::now();
 	logger.chronoLog("buffer creation time", start, end);
 
-	// Determine block size
-	dim3 blockSize(16, 16); // Default block size
+	// Transfer data to device
+	start = std::chrono::steady_clock::now();
+	cudaEvent_t transferEvent, startEvent, endEvent;
+	CUDA_CHECK(cudaEventCreate(&transferEvent));
+	CUDA_CHECK(cudaEventCreate(&startEvent));
+	CUDA_CHECK(cudaEventCreate(&endEvent));
+
+	CUDA_CHECK(cudaEventRecord(startEvent));
+	CUDA_CHECK(cudaMemcpy(deviceInput, hostPinnedInput, gridSize * sizeof(unsigned char), cudaMemcpyHostToDevice));
+	CUDA_CHECK(cudaEventRecord(transferEvent));
+	CUDA_CHECK(cudaEventSynchronize(transferEvent));
+
+	float transferTime = 0;
+	CUDA_CHECK(cudaEventElapsedTime(&transferTime, startEvent, transferEvent));
+	logger.log("host-to-device transfer time", transferTime);
+
+	end = std::chrono::steady_clock::now();
+	logger.chronoLog("total host-to-device transfer time", start, end);
+
+	// Setup kernel execution parameters
+	dim3 blockSize(16, 16); // 16x16 block size (optimal for many CUDA GPUs)
 	dim3 gridDim((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
-	// Record transfer start time
-	CUDA_CHECK(cudaEventRecord(start_event, stream1));
+	// Calculate shared memory size - (blockSize.x + 2) * (blockSize.y + 2) for the halo
+	size_t sharedMemSize = (blockSize.x + 2) * (blockSize.y + 2) * sizeof(unsigned char);
 
-	// Asynchronously copy input data to device
-	CUDA_CHECK(
-		cudaMemcpyAsync(d_input, h_pinnedInput, gridSize * sizeof(unsigned char), cudaMemcpyHostToDevice, stream1));
+	double totalTime = 0;
 
-	// Record transfer end time
-	CUDA_CHECK(cudaEventRecord(stop_event, stream1));
-	CUDA_CHECK(cudaEventSynchronize(stop_event));
-
-	CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start_event, stop_event));
-	logger.log("host-to-device transfer time", milliseconds);
-
-	// Record kernel execution start time
-	CUDA_CHECK(cudaEventRecord(kernel_start, stream1));
-
-	// Process steps using stream1
-	for (size_t step = 0; step < steps; step++)
+	for (size_t step = 0; step < steps; step += stepsPerKernel)
 	{
-		// Launch kernel for one step in stream1
-		gol_step<<<gridDim, blockSize, 0, stream1>>>(d_input, d_output, width, height);
+		size_t stepsThisIteration = std::min(stepsPerKernel, steps - step);
 
-		// Swap buffers for next iteration
-		std::swap(d_input, d_output);
+		CUDA_CHECK(cudaEventRecord(startEvent));
+
+		// Launch kernel with shared memory
+		golMultiStepKernel<<<gridDim, blockSize, sharedMemSize>>>(deviceInput, deviceOutput, deviceTemp, width, height,
+																  stepsThisIteration);
+
+		CUDA_CHECK(cudaEventRecord(endEvent));
+		CUDA_CHECK(cudaEventSynchronize(endEvent));
+
+		// Check for kernel execution errors
+		CUDA_CHECK(cudaGetLastError());
+
+		float kernelExecTime = 0;
+		CUDA_CHECK(cudaEventElapsedTime(&kernelExecTime, startEvent, endEvent));
+		logger.log("batch kernel exec time", kernelExecTime);
+		totalTime += kernelExecTime;
+
+		// Swap buffers if needed (same logic as OpenCL version)
+		if (stepsThisIteration % 2 != 0)
+		{
+			std::swap(deviceInput, deviceOutput);
+		}
 	}
 
-	// Make sure the last iteration's result is in d_input
-	// (because we swap after each step)
-	if (steps % 2 == 1)
-	{
-		std::swap(d_input, d_output);
-	}
+	logger.log("total kernel exec time", totalTime);
 
-	// Record kernel execution end time
-	CUDA_CHECK(cudaEventRecord(kernel_stop, stream1));
-	CUDA_CHECK(cudaEventSynchronize(kernel_stop));
-	CUDA_CHECK(cudaGetLastError()); // Check for any errors in kernel launch
-
-	CUDA_CHECK(cudaEventElapsedTime(&milliseconds, kernel_start, kernel_stop));
-	logger.log("total kernel exec time", milliseconds);
-
-	// Start timing transfer back to host
+	// Transfer data back to host
 	start = std::chrono::steady_clock::now();
 
-	// Record device-to-host transfer start
-	CUDA_CHECK(cudaEventRecord(start_event, stream2));
+	CUDA_CHECK(cudaEventRecord(startEvent));
+	CUDA_CHECK(cudaMemcpy(hostPinnedOutput, deviceInput, gridSize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+	CUDA_CHECK(cudaEventRecord(transferEvent));
+	CUDA_CHECK(cudaEventSynchronize(transferEvent));
 
-	// Asynchronously copy results back to pinned memory using stream2
-	// This could potentially overlap with any remaining work in stream1
-	CUDA_CHECK(
-		cudaMemcpyAsync(h_pinnedOutput, d_input, gridSize * sizeof(unsigned char), cudaMemcpyDeviceToHost, stream2));
+	float transferBackTime = 0;
+	CUDA_CHECK(cudaEventElapsedTime(&transferBackTime, startEvent, transferEvent));
+	logger.log("device-to-host transfer time", transferBackTime);
 
-	// Record device-to-host transfer end
-	CUDA_CHECK(cudaEventRecord(stop_event, stream2));
-	CUDA_CHECK(cudaEventSynchronize(stop_event));
-
-	CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start_event, stop_event));
-	logger.log("device-to-host transfer time", milliseconds);
-
-	// Copy from pinned memory to final output buffer
-	std::memcpy(outputGrid.data(), h_pinnedOutput, gridSize * sizeof(unsigned char));
+	// Copy the result to output grid
+	std::memcpy(outputGrid.data(), hostPinnedOutput, gridSize * sizeof(unsigned char));
 
 	end = std::chrono::steady_clock::now();
 	logger.chronoLog("total device-to-host transfer time", start, end);
 
-	// Clean up resources
-	CUDA_CHECK(cudaFreeHost(h_pinnedInput));
-	CUDA_CHECK(cudaFreeHost(h_pinnedOutput));
-	CUDA_CHECK(cudaFree(d_input));
-	CUDA_CHECK(cudaFree(d_output));
-	CUDA_CHECK(cudaEventDestroy(start_event));
-	CUDA_CHECK(cudaEventDestroy(stop_event));
-	CUDA_CHECK(cudaEventDestroy(kernel_start));
-	CUDA_CHECK(cudaEventDestroy(kernel_stop));
-	CUDA_CHECK(cudaStreamDestroy(stream1));
-	CUDA_CHECK(cudaStreamDestroy(stream2));
+	// Cleanup
+	CUDA_CHECK(cudaEventDestroy(transferEvent));
+	CUDA_CHECK(cudaEventDestroy(startEvent));
+	CUDA_CHECK(cudaEventDestroy(endEvent));
+	CUDA_CHECK(cudaFreeHost(hostPinnedInput));
+	CUDA_CHECK(cudaFreeHost(hostPinnedOutput));
+	CUDA_CHECK(cudaFree(deviceInput));
+	CUDA_CHECK(cudaFree(deviceOutput));
+	CUDA_CHECK(cudaFree(deviceTemp));
 }
 
 int main(int argc, char *argv[])
