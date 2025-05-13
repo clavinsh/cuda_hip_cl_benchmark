@@ -15,35 +15,6 @@
 #include <utility>
 #include <vector>
 
-// debug vajadzībām
-void printCharacterBytes(char c)
-{
-	std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(c) << " ";
-	std::cout << std::dec << std::endl;
-}
-
-void processGridFileLine(std::vector<uint8_t> &grid, const std::string &line)
-{
-	for (char c : line)
-	{
-		if (c == '\n' || c == '\0')
-		{
-			return;
-		}
-
-		if (c != '0' && c != '1')
-		{
-			std::string s = "Invalid character '";
-			s.append(1, c);
-			s += "' in grid file";
-
-			throw std::runtime_error(s);
-		}
-
-		grid.push_back(c == '0' ? 0 : 1);
-	}
-}
-
 // izveido flat grid masīvu, automātiski nosakot width, height
 // met ārā kļūdas ja nav atbilstošu simbolu (1, 0) vai ja kāda rindiņa nesatur tādu pašu simbolu skaitu kā pirmā
 std::vector<cl_uchar> loadGridFromFile(const std::string &fileName, size_t &width, size_t &height)
@@ -94,7 +65,7 @@ std::vector<cl_uchar> loadGridFromFile(const std::string &fileName, size_t &widt
 
 			for (size_t j = 0; j < width; ++j)
 			{
-				cl_uchar val = static_cast<cl_uchar>(buffer[lineStartPos + j] - '0'); // adjust as needed
+				cl_uchar val = static_cast<cl_uchar>(buffer[lineStartPos + j] - '0');
 				grid.push_back(val);
 			}
 
@@ -142,7 +113,7 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 					cl_ulong width, cl_ulong height, size_t steps, BenchmarkLogger &logger)
 {
 	cl_int clResult;
-	const size_t stepsPerKernel = 1024;
+	const size_t stepsPerKernel = 1 << 10;
 
 	size_t gridSize = width * height;
 	outputGrid.resize(gridSize);
@@ -227,9 +198,9 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 
 	for (size_t step = 0; step < steps; step += stepsPerKernel)
 	{
-		cl_uchar stepsThisIteration = (cl_uchar)std::min(stepsPerKernel, steps - step);
+		cl_ulong stepsThisIteration = std::min(stepsPerKernel, steps - step);
 
-		clResult = clSetKernelArg(kernel, 5, sizeof(cl_uchar), &stepsThisIteration);
+		clResult = clSetKernelArg(kernel, 5, sizeof(cl_ulong), &stepsThisIteration);
 		ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
 		cl_event profilingEvent;
