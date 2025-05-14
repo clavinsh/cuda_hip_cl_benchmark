@@ -5,8 +5,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
-#include <hip/hip_runtime.h>
 #include <fstream>
+#include <hip/hip_runtime.h>
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,9 +18,9 @@
 // macro priekš katra cuda API izsaukuma rezultāta pārbaudes
 // ņemts no
 // https://stackoverflow.com/questions/14038589/what-is-the-canonical-way-to-check-for-errors-using-the-cuda-runtime-api
-#define HIP_CHECK(ans)                                                                                                  \
-	{                                                                                                                   \
-		gpuAssert((ans), __FILE__, __LINE__);                                                                           \
+#define CUDA_CHECK(ans)                                                                                                \
+	{                                                                                                                  \
+		gpuAssert((ans), __FILE__, __LINE__);                                                                          \
 	}
 inline void gpuAssert(hipError_t code, const char *file, int line, bool abort = true)
 {
@@ -162,7 +162,7 @@ inline __device__ int neighborCount(int x, int y, const unsigned char *grid)
 	return neighbors;
 }
 
-__global__ void GoL(unsigned char *input, unsigned char *output)
+__global__ void golMultiStepKernel(unsigned char *input, unsigned char *output)
 {
 	const int x = blockIdx.x * blockDim.x + threadIdx.x;
 	const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -200,18 +200,18 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 
 	unsigned char *hostPinnedInput = nullptr;
 	unsigned char *hostPinnedOutput = nullptr;
-	HIP_CHECK(hipHostMalloc(&hostPinnedInput, gridSize * sizeof(unsigned char), hipHostMallocDefault));
-	HIP_CHECK(hipHostMalloc(&hostPinnedOutput, gridSize * sizeof(unsigned char), hipHostMallocDefault));
+	CUDA_CHECK(hipHostMalloc(&hostPinnedInput, gridSize * sizeof(unsigned char), hipHostMallocDefault));
+	CUDA_CHECK(hipHostMalloc(&hostPinnedOutput, gridSize * sizeof(unsigned char), hipHostMallocDefault));
 
 	std::memcpy(hostPinnedInput, grid.data(), gridSize * sizeof(unsigned char));
 
-	HIP_CHECK(hipMemcpyToSymbol(HIP_SYMBOL(d_width), &width, sizeof(size_t)));
-	HIP_CHECK(hipMemcpyToSymbol(HIP_SYMBOL(d_height), &height, sizeof(size_t)));
+	CUDA_CHECK(hipMemcpyToSymbol(HIP_SYMBOL(d_width), &width, sizeof(size_t)));
+	CUDA_CHECK(hipMemcpyToSymbol(HIP_SYMBOL(d_height), &height, sizeof(size_t)));
 
 	unsigned char *deviceInput = nullptr;
 	unsigned char *deviceOutput = nullptr;
-	HIP_CHECK(hipMalloc(&deviceInput, gridSize * sizeof(unsigned char)));
-	HIP_CHECK(hipMalloc(&deviceOutput, gridSize * sizeof(unsigned char)));
+	CUDA_CHECK(hipMalloc(&deviceInput, gridSize * sizeof(unsigned char)));
+	CUDA_CHECK(hipMalloc(&deviceOutput, gridSize * sizeof(unsigned char)));
 
 	auto end = std::chrono::steady_clock::now();
 
@@ -220,17 +220,17 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	start = std::chrono::steady_clock::now();
 
 	hipEvent_t transferEvent, startEvent, endEvent;
-	HIP_CHECK(hipEventCreate(&transferEvent));
-	HIP_CHECK(hipEventCreate(&startEvent));
-	HIP_CHECK(hipEventCreate(&endEvent));
+	CUDA_CHECK(hipEventCreate(&transferEvent));
+	CUDA_CHECK(hipEventCreate(&startEvent));
+	CUDA_CHECK(hipEventCreate(&endEvent));
 
-	HIP_CHECK(hipEventRecord(startEvent));
-	HIP_CHECK(hipMemcpy(deviceInput, hostPinnedInput, gridSize * sizeof(unsigned char), hipMemcpyHostToDevice));
-	HIP_CHECK(hipEventRecord(transferEvent));
-	HIP_CHECK(hipEventSynchronize(transferEvent));
+	CUDA_CHECK(hipEventRecord(startEvent));
+	CUDA_CHECK(hipMemcpy(deviceInput, hostPinnedInput, gridSize * sizeof(unsigned char), hipMemcpyHostToDevice));
+	CUDA_CHECK(hipEventRecord(transferEvent));
+	CUDA_CHECK(hipEventSynchronize(transferEvent));
 
 	float transferTime = 0;
-	HIP_CHECK(hipEventElapsedTime(&transferTime, startEvent, transferEvent));
+	CUDA_CHECK(hipEventElapsedTime(&transferTime, startEvent, transferEvent));
 	logger.log("host-to-device transfer time", transferTime);
 
 	end = std::chrono::steady_clock::now();
@@ -248,17 +248,17 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	for (size_t step = 0; step < steps; step++)
 	{
 
-		HIP_CHECK(hipEventRecord(startEvent));
+		CUDA_CHECK(hipEventRecord(startEvent));
 
-		GoL<<<gridDim, blockSize>>>(currentInput, currentOutput);
+		golMultiStepKernel<<<gridDim, blockSize>>>(currentInput, currentOutput);
 
-		HIP_CHECK(hipEventRecord(endEvent));
-		HIP_CHECK(hipEventSynchronize(endEvent));
+		CUDA_CHECK(hipEventRecord(endEvent));
+		CUDA_CHECK(hipEventSynchronize(endEvent));
 
-		HIP_CHECK(hipGetLastError());
+		CUDA_CHECK(hipGetLastError());
 
 		float kernelExecTime = 0;
-		HIP_CHECK(hipEventElapsedTime(&kernelExecTime, startEvent, endEvent));
+		CUDA_CHECK(hipEventElapsedTime(&kernelExecTime, startEvent, endEvent));
 		logger.log("kernel exec time", kernelExecTime);
 		totalTime += kernelExecTime;
 
@@ -269,14 +269,14 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 
 	start = std::chrono::steady_clock::now();
 
-	HIP_CHECK(hipEventRecord(startEvent));
+	CUDA_CHECK(hipEventRecord(startEvent));
 	// ņemot vērā pēdējo std::swap ar buferiem, pēdējā izeja atrodas input bufeŗi
-	HIP_CHECK(hipMemcpy(hostPinnedOutput, currentInput, gridSize * sizeof(unsigned char), hipMemcpyDeviceToHost));
-	HIP_CHECK(hipEventRecord(transferEvent));
-	HIP_CHECK(hipEventSynchronize(transferEvent));
+	CUDA_CHECK(hipMemcpy(hostPinnedOutput, currentInput, gridSize * sizeof(unsigned char), hipMemcpyDeviceToHost));
+	CUDA_CHECK(hipEventRecord(transferEvent));
+	CUDA_CHECK(hipEventSynchronize(transferEvent));
 
 	float transferBackTime = 0;
-	HIP_CHECK(hipEventElapsedTime(&transferBackTime, startEvent, transferEvent));
+	CUDA_CHECK(hipEventElapsedTime(&transferBackTime, startEvent, transferEvent));
 
 	logger.log("device-to-host transfer time", transferBackTime);
 
@@ -285,13 +285,13 @@ void GameOfLifeStep(std::vector<unsigned char> &grid, std::vector<unsigned char>
 	end = std::chrono::steady_clock::now();
 	logger.chronoLog("total device-to-host transfer time", start, end);
 
-	HIP_CHECK(hipEventDestroy(transferEvent));
-	HIP_CHECK(hipEventDestroy(startEvent));
-	HIP_CHECK(hipEventDestroy(endEvent));
-	HIP_CHECK(hipHostFree(hostPinnedInput));
-	HIP_CHECK(hipHostFree(hostPinnedOutput));
-	HIP_CHECK(hipFree(deviceInput));
-	HIP_CHECK(hipFree(deviceOutput));
+	CUDA_CHECK(hipEventDestroy(transferEvent));
+	CUDA_CHECK(hipEventDestroy(startEvent));
+	CUDA_CHECK(hipEventDestroy(endEvent));
+	CUDA_CHECK(hipHostFree(hostPinnedInput));
+	CUDA_CHECK(hipHostFree(hostPinnedOutput));
+	CUDA_CHECK(hipFree(deviceInput));
+	CUDA_CHECK(hipFree(deviceOutput));
 }
 
 int main(int argc, char *argv[])
@@ -319,7 +319,7 @@ int main(int argc, char *argv[])
 
 		auto cudaInitStart = std::chrono::steady_clock::now();
 
-		HIP_CHECK(hipSetDevice(0));
+		CUDA_CHECK(hipSetDevice(0));
 
 		auto cudaInitEnd = std::chrono::steady_clock::now();
 
