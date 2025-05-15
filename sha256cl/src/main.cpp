@@ -43,7 +43,6 @@ std::vector<cl_uint> hexStringToBytes(const std::string &hexHash)
 
 	std::vector<cl_uint> hash;
 
-	// Process every 8 hex digits (32 bits) to create a uint32_t
 	for (size_t i = 0; i < hexHash.length(); i += 8)
 	{
 		std::string chunk = hexHash.substr(i, 8);
