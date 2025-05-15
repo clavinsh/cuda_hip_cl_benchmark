@@ -247,7 +247,6 @@ void GameOfLifeStep(ClStuffContainer &clStuffContainer, std::vector<cl_uchar> &g
 		clEnqueueUnmapMemObject(clStuffContainer.queue, hostPinnedOutputBuffer, mappedOutputPtr, 0, nullptr, nullptr);
 	ASSERT(clResult == CL_SUCCESS, ClErrorCodesToString(clResult));
 
-	// Release resources
 	clReleaseMemObject(hostPinnedInputBuffer);
 	clReleaseMemObject(hostPinnedOutputBuffer);
 	clReleaseMemObject(deviceInputBuffer);
