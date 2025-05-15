@@ -5,5 +5,5 @@
 
 ### Uz Docker
 
-`$ docker buildx build . --target cuda -t sha256hip:cuda` (priekš CUDA)
-`$ docker buildx build . --target rocm -t sha256hip:rocm` (priekš ROCM)
+`$ docker buildx build . --target cuda -t golhip:cuda` (priekš CUDA)
+`$ docker buildx build . --target rocm -t golhip:rocm` (priekš ROCM)
