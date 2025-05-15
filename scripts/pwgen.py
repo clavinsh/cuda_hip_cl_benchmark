@@ -1,4 +1,4 @@
-# Vienkarss python skripts, lai faila saglabatu nejausas paroles
+# Skripts, lai faila saglabatu nejausas paroles
 # Paredzets lielu parolu failu testiem
 
 import random
