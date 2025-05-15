@@ -1,4 +1,4 @@
-// SHA 256 implementācija HIP vidē
+// SHA 256 implementācija CUDA vidē
 // https://en.wikipedia.org/wiki/SHA-2
 
 #include "benchmarkLogger.h"
@@ -7,8 +7,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
+#include <cuda/std/cstdint> // analogs C/C++ <cstdint>, bet nodrošina fiksētus datu tipu lielumus uz device
 #include <hip/hip_runtime.h>
+
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -51,17 +53,17 @@ inline void gpuAssert(hipError_t code, const char *file, int line, bool abort = 
 #define MAJ(x, y, z) ((x & y) ^ (x & z) ^ (y & z))
 
 // pirmie 32 biti kv. saknei no pirmajiem 8 pirmskaitļiem 2 - 19 (no daļas aiz komata)
-__device__ std::uint32_t h0 = 0x6a09e667;
-__device__ std::uint32_t h1 = 0xbb67ae85;
-__device__ std::uint32_t h2 = 0x3c6ef372;
-__device__ std::uint32_t h3 = 0xa54ff53a;
-__device__ std::uint32_t h4 = 0x510e527f;
-__device__ std::uint32_t h5 = 0x9b05688c;
-__device__ std::uint32_t h6 = 0x1f83d9ab;
-__device__ std::uint32_t h7 = 0x5be0cd19;
+__device__ cuda::std::uint32_t h0 = 0x6a09e667;
+__device__ cuda::std::uint32_t h1 = 0xbb67ae85;
+__device__ cuda::std::uint32_t h2 = 0x3c6ef372;
+__device__ cuda::std::uint32_t h3 = 0xa54ff53a;
+__device__ cuda::std::uint32_t h4 = 0x510e527f;
+__device__ cuda::std::uint32_t h5 = 0x9b05688c;
+__device__ cuda::std::uint32_t h6 = 0x1f83d9ab;
+__device__ cuda::std::uint32_t h7 = 0x5be0cd19;
 
 // pirmie 32 biti no kubsaknēm pirmajiem 64 pirmskaitļiem 2 - 311
-__device__ __constant__ std::uint32_t k[] = {
+__device__ __constant__ cuda::std::uint32_t k[] = {
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
 	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
 	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -74,9 +76,9 @@ __device__ __constant__ std::uint32_t k[] = {
 // apstrādā vienu, konkrētu 512 bitu bloku
 // 'state' ir 8 skaitļu masīvs, kuram apstrādes sākumā jāsatur h0-h7 konstantes, apstrādes beigās saturēs hash vērtību
 // 'chunk' satur apstrādājamo bitu bloku
-__device__ void sha256ProcessChunk(std::uint32_t *state, std::uint8_t *chunk)
+__device__ void sha256ProcessChunk(cuda::std::uint32_t *state, cuda::std::uint8_t *chunk)
 {
-	std::uint32_t w[64];
+	cuda::std::uint32_t w[64];
 
 	// iekopē visus 512 bitus iekš w masīva (512/32 = 16 vērtības)
 	// baiti jāieliek iekš 32 bitu vārdiem, lai pirmais baits būtu pirmais (skatoties no kreisās uz labo pusi),
@@ -96,19 +98,19 @@ __device__ void sha256ProcessChunk(std::uint32_t *state, std::uint8_t *chunk)
 		w[i] = w[i - 16] + SS0(w[i - 15]) + w[i - 7] + SS1(w[i - 2]);
 	}
 
-	uint32_t a = state[0];
-	uint32_t b = state[1];
-	uint32_t c = state[2];
-	uint32_t d = state[3];
-	uint32_t e = state[4];
-	uint32_t f = state[5];
-	uint32_t g = state[6];
-	uint32_t h = state[7];
+	cuda::std::uint32_t a = state[0];
+	cuda::std::uint32_t b = state[1];
+	cuda::std::uint32_t c = state[2];
+	cuda::std::uint32_t d = state[3];
+	cuda::std::uint32_t e = state[4];
+	cuda::std::uint32_t f = state[5];
+	cuda::std::uint32_t g = state[6];
+	cuda::std::uint32_t h = state[7];
 
 	for (int i = 0; i < 64; i++)
 	{
-		std::uint32_t temp1 = h + S1(e) + CH(e, f, g) + k[i] + w[i];
-		std::uint32_t temp2 = S0(a) + MAJ(a, b, c);
+		cuda::std::uint32_t temp1 = h + S1(e) + CH(e, f, g) + k[i] + w[i];
+		cuda::std::uint32_t temp2 = S0(a) + MAJ(a, b, c);
 		h = g;
 		g = f;
 		f = e;
@@ -129,7 +131,7 @@ __device__ void sha256ProcessChunk(std::uint32_t *state, std::uint8_t *chunk)
 	state[7] += h;
 }
 
-__device__ void sha256(const std::uint8_t *input, std::uint64_t length, std::uint8_t *output)
+__device__ void sha256(const cuda::std::uint8_t *input, cuda::std::uint64_t length, cuda::std::uint8_t *output)
 {
 	// vienkāršības pēc apstrādāsim viena bloka ietvaros, tāpēc, ņemot vērā ziņojuma garumu un padding,
 	// ziņojuma garums nedrīkst būt lielāks par 440 bitiem, lai viss ietilpstu vienā 512 bitu blokā
@@ -137,9 +139,9 @@ __device__ void sha256(const std::uint8_t *input, std::uint64_t length, std::uin
 	bool lengthOk = length <= (440 / 8);
 	assert(lengthOk);
 
-	std::uint32_t state[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+	cuda::std::uint32_t state[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
 
-	std::uint8_t chunk[64];
+	cuda::std::uint8_t chunk[64];
 
 	// sākumā nonullējam bloku
 	for (int i = 0; i < 64; i++)
@@ -168,16 +170,16 @@ __device__ void sha256(const std::uint8_t *input, std::uint64_t length, std::uin
 	// sadalām 32 bitu vērtības 4ās 8 bitu un ierakstām output masīvā
 	for (int i = 0; i < 8; i++)
 	{
-		std::uint32_t currentStateValue = state[i];
+		cuda::std::uint32_t currentStateValue = state[i];
 
-		output[i * 4] = (std::uint8_t)(currentStateValue >> 24);
-		output[i * 4 + 1] = (std::uint8_t)(currentStateValue >> 16);
-		output[i * 4 + 2] = (std::uint8_t)(currentStateValue >> 8);
-		output[i * 4 + 3] = (std::uint8_t)(currentStateValue);
+		output[i * 4] = (cuda::std::uint8_t)(currentStateValue >> 24);
+		output[i * 4 + 1] = (cuda::std::uint8_t)(currentStateValue >> 16);
+		output[i * 4 + 2] = (cuda::std::uint8_t)(currentStateValue >> 8);
+		output[i * 4 + 3] = (cuda::std::uint8_t)(currentStateValue);
 	}
 }
 
-__device__ bool compareHashes(const std::uint8_t *h1, const std::uint8_t *h2)
+__device__ bool compareHashes(const cuda::std::uint8_t *h1, const cuda::std::uint8_t *h2)
 {
 	for (int i = 0; i < 32; i++)
 	{
@@ -218,8 +220,8 @@ __host__ size_t h_current_pw_size(std::vector<uint> &offsets, uint password_coun
 	}
 }
 
-__global__ void kernel(const std::uint8_t *passwords, const uint *offsets, uint pwCount, uint charCount,
-					   const std::uint8_t *targetHash, int *resultIndex)
+__global__ void kernel(const cuda::std::uint8_t *passwords, const uint *offsets, uint pwCount, uint charCount,
+					   const cuda::std::uint8_t *targetHash, int *resultIndex)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -228,11 +230,11 @@ __global__ void kernel(const std::uint8_t *passwords, const uint *offsets, uint 
 		return;
 	}
 
-	const std::uint8_t *password = passwords + offsets[idx];
+	const cuda::std::uint8_t *password = passwords + offsets[idx];
 
 	size_t pwLength = current_pw_size(offsets, pwCount, charCount, idx);
 
-	std::uint8_t hash[32];
+	cuda::std::uint8_t hash[32];
 
 	sha256(password, pwLength, hash);
 
@@ -323,9 +325,9 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 
 	auto deviceFixedBuffersAndDataStart = std::chrono::steady_clock::now();
 
-	std::uint8_t *d_hash;
+	cuda::std::uint8_t *d_hash;
 	int *d_crackedIdx;
-	std::uint8_t *d_passwords;
+	cuda::std::uint8_t *d_passwords;
 	uint *d_offsets;
 
 	CUDA_CHECK(hipMalloc(&d_hash, 32));
@@ -336,7 +338,7 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 	CUDA_CHECK(hipEventCreate(&start));
 	CUDA_CHECK(hipEventCreate(&stop));
 
-	CUDA_CHECK(hipMalloc(&d_passwords, batchSize * 16 * sizeof(std::uint8_t)));
+	CUDA_CHECK(hipMalloc(&d_passwords, batchSize * 16 * sizeof(cuda::std::uint8_t)));
 	CUDA_CHECK(hipMalloc(&d_offsets, batchSize * sizeof(uint)));
 
 	auto deviceFixedBuffersAndDataEnd = std::chrono::steady_clock::now();
@@ -376,7 +378,7 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 		CUDA_CHECK(hipMemcpy(d_crackedIdx, cracked_idx, sizeof(int), hipMemcpyHostToDevice));
 
 		CUDA_CHECK(
-			hipMemcpy(d_passwords, h_passwordsPinned, pwBytes * sizeof(std::uint8_t), hipMemcpyHostToDevice));
+			hipMemcpy(d_passwords, h_passwordsPinned, pwBytes * sizeof(cuda::std::uint8_t), hipMemcpyHostToDevice));
 		CUDA_CHECK(hipMemcpy(d_offsets, h_offsetsPinned, i * sizeof(uint), hipMemcpyHostToDevice));
 
 		auto bufferCreationEnd = std::chrono::steady_clock::now();
@@ -444,8 +446,8 @@ void hashCheck(const std::string &fileName, std::vector<uint8_t> &hash, int *cra
 }
 
 // sha funkcijas testa device kodols
-__global__ void testKernel(const std::uint8_t *input, std::uint64_t length,
-						   std::uint8_t *calculatedHash)
+__global__ void testKernel(const cuda::std::uint8_t *input, cuda::std::uint64_t length,
+						   cuda::std::uint8_t *calculatedHash)
 {
 	// testam pietieks ar pirmo pavedienu
 	if (threadIdx.x != 0 || blockIdx.x != 0)
@@ -468,9 +470,9 @@ void testSha(const std::string &password, const std::string hexExpectedHash)
 		passwordBytes[i] = password[i];
 	}
 
-	std::uint8_t *d_password;
-	std::uint8_t *d_hash;
-	std::uint8_t *d_calculatedHash;
+	cuda::std::uint8_t *d_password;
+	cuda::std::uint8_t *d_hash;
+	cuda::std::uint8_t *d_calculatedHash;
 
 	CUDA_CHECK(hipSetDevice(0));
 
@@ -488,7 +490,7 @@ void testSha(const std::string &password, const std::string hexExpectedHash)
 	CUDA_CHECK(hipGetLastError());
 	CUDA_CHECK(hipDeviceSynchronize());
 
-	std::uint8_t h_calculatedHash[32];
+	cuda::std::uint8_t h_calculatedHash[32];
 
 	CUDA_CHECK(hipMemcpy(&h_calculatedHash, d_calculatedHash, 32, hipMemcpyDeviceToHost));
 
