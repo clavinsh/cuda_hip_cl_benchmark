@@ -187,7 +187,6 @@ class BenchmarkStuff:
             self.stop_gpu_monitoring(gpu_process)
 
     def run_sha256_benchmark(self, implementation, password_count, position, run_id=0, cooldown=1):
-        """Run one SHA256 benchmark with directory-based volume mounting"""
         pw_file = f"passwords_{password_count}.txt"
         log_file = f"sha256_{password_count}_{position}_{implementation}_{run_id}.log"
         
@@ -199,7 +198,7 @@ class BenchmarkStuff:
         pw_hash = self.target_hashes[key]
         target_pw = self.target_pws[key]
 
-        benchmar_config_name = f"gol_{width}x{height}_steps_{steps}_{implementation}_{run_id}"
+        benchmar_config_name = f"sha256_{password_count}_{position}_{implementation}_{run_id}"
         gpu_process, gpu_log_file = self.start_gpu_monitoring(benchmar_config_name) 
 
         try:
@@ -354,7 +353,7 @@ class BenchmarkStuff:
                 "nvidia-smi",
                 "--query-gpu=timestamp,name,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.free,memory.used,power.draw,clocks.current.graphics,clocks.current.memory",
                 "--format=csv",
-                "--loop=1",
+                "--loop-ms=5", # 5ms vajadzētu būt pietiekams resolution
                 "-f", str(log_file)
             ]
     
